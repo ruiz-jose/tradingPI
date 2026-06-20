@@ -102,6 +102,42 @@ async def test():
 
     await client.close_connection()
 
+    # 7. Conexión a Futures Testnet (usada por bot.py en vivo)
+    print("\n[7] Conectando a Binance Futures...")
+    has_fut_key = bool(config.FUTURES_API_KEY) and config.FUTURES_API_KEY != config.API_KEY
+    if not has_fut_key:
+        print("    ⚠ BINANCE_FUTURES_API_KEY no configurada (distinta de la de Spot).")
+        print("      Genera unas en https://testnet.binancefuture.com y añádelas a .env")
+        print("      antes de ejecutar bot.py. Saltando pruebas de Futures.")
+    else:
+        try:
+            fut_client = await AsyncClient.create(
+                config.FUTURES_API_KEY, config.FUTURES_API_SECRET,
+            )
+            if config.FUTURES_TESTNET:
+                fut_client.FUTURES_URL = fut_client.FUTURES_TESTNET_URL
+            fut_mode = "TESTNET" if config.FUTURES_TESTNET else "LIVE"
+            print(f"    ✓ Conectado [Futures {fut_mode}]")
+
+            balances = await fut_client.futures_account_balance()
+            usdt = next((b for b in balances if b["asset"] == "USDT"), None)
+            if usdt:
+                print(f"    ✓ Balance Futures USDT: {float(usdt['availableBalance']):.2f}")
+            else:
+                print("    ⚠ No se encontró balance USDT en la cuenta de Futures.")
+
+            for symbol in config.SYMBOLS:
+                ticker = await fut_client.futures_symbol_ticker(symbol=symbol)
+                print(f"    ✓ {symbol}: {float(ticker['price']):,.2f} USDT")
+
+            await fut_client.close_connection()
+        except BinanceAPIException as exc:
+            print(f"    ✗ Error de API Futures: {exc}")
+            ok = False
+        except Exception as exc:
+            print(f"    ✗ {exc}")
+            ok = False
+
     print("\n" + "=" * 55)
     if ok:
         print("  RESULTADO: Todo correcto — el bot puede conectarse.")

@@ -25,8 +25,11 @@ class EMAStrategy:
         adx_min: float = 0.0,
         atr_vol_period: int = 50,
         atr_vol_min_ratio: float = 0.5,
+        atr_vol_max_ratio: float = 0.0,
         er_period: int = 10,
         er_min: float = 0.0,
+        rsi_sell_min: float = 20.0,
+        rsi_sell_max: float = 60.0,
     ):
         self.fast_period = fast_period
         self.slow_period = slow_period
@@ -34,6 +37,8 @@ class EMAStrategy:
         self.rsi_period = rsi_period
         self.rsi_min = rsi_min
         self.rsi_max = rsi_max
+        self.rsi_sell_min = rsi_sell_min
+        self.rsi_sell_max = rsi_sell_max
         self.adx_min = adx_min
 
         self.ema_fast: float | None = None
@@ -69,6 +74,7 @@ class EMAStrategy:
         # Normalización de volatilidad
         self._atr_vol_period = atr_vol_period
         self._atr_vol_min_ratio = atr_vol_min_ratio
+        self._atr_vol_max_ratio = atr_vol_max_ratio  # 0 = sin techo (kill-switch desactivado)
         self._avg_atr: float | None = None
 
         # Efficiency Ratio: detecta regímenes trending vs choppy
@@ -200,6 +206,10 @@ class EMAStrategy:
         return "HOLD"
 
     @property
+    def avg_atr(self) -> float | None:
+        return self._avg_atr
+
+    @property
     def vol_multiplier(self) -> float:
         """Multiplicador de posición [0,1]: reduce cuando ATR > promedio.
         En entornos de alta volatilidad, la posición ATR-sizing ya es pequeña.
@@ -213,10 +223,16 @@ class EMAStrategy:
 
     @property
     def _atr_regime_ok(self) -> bool:
-        """True si la volatilidad actual está dentro de régimen normal (no demasiado quieto)."""
+        """True si la volatilidad actual está en régimen normal: ni demasiado quieto
+        (mercado lateral sin movimiento) ni demasiado extremo (evento tipo flash-crash/noticia,
+        donde el sizing por ATR normal puede subestimar el riesgo real)."""
         if self.current_atr is None or self._avg_atr is None:
             return True  # sin datos → no bloquear
-        return self.current_atr >= self._atr_vol_min_ratio * self._avg_atr
+        if self.current_atr < self._atr_vol_min_ratio * self._avg_atr:
+            return False
+        if self._atr_vol_max_ratio > 0 and self.current_atr > self._atr_vol_max_ratio * self._avg_atr:
+            return False
+        return True
 
     @property
     def is_trending(self) -> bool:
@@ -226,24 +242,38 @@ class EMAStrategy:
         return self.current_er is not None and self.current_er >= self._er_min
 
     @property
+    def _adx_ok(self) -> bool:
+        if self.adx_min <= 0:
+            return True
+        return self.current_adx is not None and self.current_adx >= self.adx_min
+
+    @property
     def can_enter_long(self) -> bool:
         """RSI en rango + ADX (si activo) + régimen ATR normal + ER trending."""
         if self.current_rsi is None:
             return False
         rsi_ok = self.rsi_min <= self.current_rsi <= self.rsi_max
-        if self.adx_min > 0:
-            if self.current_adx is None:
-                return False
-            adx_ok = self.current_adx >= self.adx_min
-        else:
-            adx_ok = True
-        return rsi_ok and adx_ok and self._atr_regime_ok and self.is_trending
+        return rsi_ok and self._adx_ok and self._atr_regime_ok and self.is_trending
+
+    @property
+    def can_enter_short(self) -> bool:
+        """Espejo de can_enter_long para posiciones cortas."""
+        if self.current_rsi is None:
+            return False
+        rsi_ok = self.rsi_sell_min <= self.current_rsi <= self.rsi_sell_max
+        return rsi_ok and self._adx_ok and self._atr_regime_ok and self.is_trending
 
     @property
     def is_bullish(self) -> bool:
         if self.ema_fast is None or self.ema_slow is None:
             return False
         return self.ema_fast > self.ema_slow
+
+    @property
+    def is_bearish(self) -> bool:
+        if self.ema_fast is None or self.ema_slow is None:
+            return False
+        return self.ema_fast < self.ema_slow
 
     @property
     def is_ready(self) -> bool:

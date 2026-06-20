@@ -39,7 +39,7 @@ from binance import AsyncClient
 from config import config
 from strategy import EMAStrategy
 from risk_manager import RiskManager
-from backtest import Trade, SLIPPAGE, FEE, _fill_trade, _fmt
+from backtest import Trade, SLIPPAGE, FEE, _fill_trade, _fmt, dynamic_slippage
 
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
@@ -125,8 +125,11 @@ def run_portfolio_backtest(
             adx_period=config.ADX_PERIOD, adx_min=config.ADX_MIN,
             atr_vol_period=config.ATR_VOL_PERIOD,
             atr_vol_min_ratio=config.ATR_VOL_MIN_RATIO,
+            atr_vol_max_ratio=config.ATR_VOL_MAX_RATIO,
             er_period=config.REGIME_ER_PERIOD,
             er_min=config.REGIME_ER_MIN,
+            rsi_sell_min=config.RSI_SELL_MIN,
+            rsi_sell_max=config.RSI_SELL_MAX,
         )
         htf_strategy = EMAStrategy(config.EMA_FAST, config.EMA_SLOW)
         pairs.append(PairState(
@@ -176,8 +179,9 @@ def run_portfolio_backtest(
                 if (config.SCALE_OUT_R > 0
                         and not current.scale_out_done
                         and current.atr > 0 and current.qty > 0):
+                    so_mult = risk_manager.get_trailing_multiplier(pair.strategy.current_adx)
                     so_price = (current.entry_price
-                                + config.SCALE_OUT_R * config.ATR_SL_MULTIPLIER * current.atr)
+                                + config.SCALE_OUT_R * so_mult * current.atr)
                     if high >= so_price:
                         partial_qty = round(current.qty * config.SCALE_OUT_RATIO, 5)
                         if partial_qty >= config.MIN_QUANTITY:
@@ -190,7 +194,8 @@ def run_portfolio_backtest(
                             current.scale_out_done = True
 
                 hit_sl = low  <= current.sl
-                hit_tp = (not config.TRAILING_STOP) and (high >= current.tp)
+                # TP fijo como techo de seguridad, incluso con trailing activo (antes era código muerto)
+                hit_tp = high >= current.tp
 
                 if hit_sl or hit_tp:
                     if hit_sl and hit_tp:
@@ -210,8 +215,9 @@ def run_portfolio_backtest(
                     closed_this_candle = True
 
                 elif config.TRAILING_STOP and pair.strategy.current_atr:
+                    trail_mult = risk_manager.get_trailing_multiplier(pair.strategy.current_adx)
                     new_sl = round(
-                        close - pair.strategy.current_atr * config.ATR_SL_MULTIPLIER, 2
+                        close - pair.strategy.current_atr * trail_mult, 2
                     )
                     if new_sl > current.sl:
                         current.sl = new_sl
@@ -219,9 +225,10 @@ def run_portfolio_backtest(
             # ── Señales (solo si no cerró posición esta vela) ──────────
             if not closed_this_candle:
                 signal = pair.strategy.get_signal()
+                slip = dynamic_slippage(pair.strategy.current_atr, pair.strategy.avg_atr)
 
                 if signal == "SELL" and pair.in_position and pair.position:
-                    exit_price = close * (1 - SLIPPAGE)
+                    exit_price = close * (1 - slip)
                     fee = exit_price * pair.position.qty * FEE
                     pnl = (exit_price - pair.position.entry_price) * pair.position.qty - fee
                     balance += pnl
@@ -232,12 +239,12 @@ def run_portfolio_backtest(
 
                 elif (signal == "BUY"
                       and not pair.in_position
-                      and pair.htf_strategy.is_bullish
+                      and (pair.htf_strategy.is_bullish or config.ALLOW_BUY_IN_BEARISH_HTF)
                       and pair.strategy.can_enter_long):
                     atr   = pair.strategy.current_atr
-                    entry = close * (1 + SLIPPAGE)
+                    entry = close * (1 + slip)
                     qty   = risk_manager.calculate_position_size(
-                        balance, entry, atr, pair.strategy.vol_multiplier
+                        balance, entry, atr, pair.strategy.vol_multiplier, pair.strategy.current_adx
                     )
                     if qty > 0:
                         balance -= entry * qty * FEE
@@ -246,7 +253,7 @@ def run_portfolio_backtest(
                             entry_price = round(entry, 2),
                             qty         = qty,
                             initial_qty = qty,
-                            sl          = risk_manager.get_stop_loss(entry, "BUY", atr),
+                            sl          = risk_manager.get_stop_loss(entry, "BUY", atr, pair.strategy.current_adx),
                             tp          = risk_manager.get_take_profit(entry, "BUY", atr),
                             atr         = round(atr, 2) if atr else 0,
                         )

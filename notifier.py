@@ -37,10 +37,11 @@ async def notify(text: str) -> None:
 
 # ── Mensajes predefinidos ─────────────────────────────────────────────
 
-def msg_bot_started(symbol: str, interval: str, balance: float, mode: str) -> str:
+def msg_bot_started(symbols, interval: str, balance: float, mode: str) -> str:
+    pares = ", ".join(symbols) if isinstance(symbols, (list, tuple)) else symbols
     return (
-        f"🤖 <b>Bot iniciado</b>\n"
-        f"Par: <code>{symbol}</code>  |  TF: <code>{interval}</code>\n"
+        f"🤖 <b>Bot iniciado [Futures]</b>\n"
+        f"Pares: <code>{pares}</code>  |  TF: <code>{interval}</code>\n"
         f"Balance: <code>{balance:,.2f} USDT</code>\n"
         f"Modo: <b>{mode}</b>"
     )
@@ -63,22 +64,47 @@ def msg_trade_open(
     )
 
 
-def msg_trade_close_signal(symbol: str, entry: float, exit_price: float, qty: float) -> str:
-    pnl = (exit_price - entry) * qty
+def msg_trade_open_short(
+    symbol: str, price: float, qty: float,
+    sl: float, tp: float, atr: float,
+    risk_usdt: float, vol_mult: float,
+) -> str:
+    return (
+        f"🔴 <b>SHORT</b> — {symbol}\n"
+        f"Precio entrada: <code>{price:,.2f} USDT</code>\n"
+        f"Cantidad: <code>{qty}</code>\n"
+        f"SL: <code>{sl:,.2f}</code>\n"
+        f"TP: <code>{tp:,.2f}</code>\n"
+        f"ATR: <code>{atr:.2f}</code>  |  VolMult: <code>{vol_mult:.2f}</code>\n"
+        f"Riesgo: <code>~{risk_usdt:.2f} USDT</code>"
+    )
+
+
+def msg_trade_close_signal(symbol: str, entry: float, exit_price: float, qty: float, side: str = "LONG") -> str:
+    pnl = (exit_price - entry) * qty if side == "LONG" else (entry - exit_price) * qty
     emoji = "✅" if pnl >= 0 else "🔻"
     return (
-        f"{emoji} <b>CIERRE (señal EMA)</b> — {symbol}\n"
+        f"{emoji} <b>CIERRE {side} (señal EMA)</b> — {symbol}\n"
         f"Entrada: <code>{entry:,.2f}</code>  →  Salida: <code>{exit_price:,.2f}</code>\n"
         f"PnL: <code>{pnl:+.2f} USDT</code>"
     )
 
 
-def msg_trade_close_sl(symbol: str, entry: float, fill_price: float, qty: float) -> str:
-    pnl = (fill_price - entry) * qty
+def msg_trade_close_sl(symbol: str, entry: float, fill_price: float, qty: float, side: str = "LONG") -> str:
+    pnl = (fill_price - entry) * qty if side == "LONG" else (entry - fill_price) * qty
     emoji = "✅" if pnl >= 0 else "🔴"
     return (
-        f"{emoji} <b>STOP-LOSS ejecutado</b> — {symbol}\n"
+        f"{emoji} <b>STOP-LOSS {side} ejecutado</b> — {symbol}\n"
         f"Entrada: <code>{entry:,.2f}</code>  →  SL: <code>{fill_price:,.2f}</code>\n"
+        f"PnL: <code>{pnl:+.2f} USDT</code>"
+    )
+
+
+def msg_trade_close_tp(symbol: str, entry: float, fill_price: float, qty: float, side: str = "LONG") -> str:
+    pnl = (fill_price - entry) * qty if side == "LONG" else (entry - fill_price) * qty
+    return (
+        f"✅ <b>TAKE-PROFIT {side} ejecutado</b> — {symbol}\n"
+        f"Entrada: <code>{entry:,.2f}</code>  →  TP: <code>{fill_price:,.2f}</code>\n"
         f"PnL: <code>{pnl:+.2f} USDT</code>"
     )
 
@@ -101,11 +127,21 @@ def msg_scale_out(symbol: str, price: float, partial_qty: float, pnl: float) -> 
     )
 
 
-def msg_circuit_breaker(balance: float, month_start: float) -> str:
-    dd = (month_start - balance) / month_start * 100
+def msg_circuit_breaker(balance: float, period_start: float, period: str = "mensual") -> str:
+    dd = (period_start - balance) / period_start * 100
+    limite = "8%" if period == "mensual" else "4%"
+    siguiente = "próximo mes" if period == "mensual" else "próximo día UTC"
     return (
-        f"⛔ <b>CIRCUIT BREAKER</b>\n"
-        f"Drawdown mensual: <code>{dd:.1f}%</code> (límite 8%)\n"
+        f"⛔ <b>CIRCUIT BREAKER ({period})</b>\n"
+        f"Drawdown {period}: <code>{dd:.1f}%</code> (límite {limite})\n"
         f"Balance: <code>{balance:,.2f} USDT</code>\n"
-        f"Operaciones suspendidas hasta el próximo mes"
+        f"Operaciones suspendidas hasta el {siguiente}"
+    )
+
+
+def msg_cooldown(consecutive_losses: int, hours: float) -> str:
+    return (
+        f"🧊 <b>COOLDOWN activado</b>\n"
+        f"{consecutive_losses} pérdidas consecutivas\n"
+        f"Sin nuevas entradas durante <code>{hours:.0f}h</code>"
     )

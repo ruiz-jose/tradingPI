@@ -75,21 +75,32 @@ nano .env
 Rellena el archivo `.env` con tus datos:
 
 ```env
+# Spot — usado por backtest.py, backtest_multi.py, optimize.py
 BINANCE_API_KEY=tu_api_key_aqui
 BINANCE_API_SECRET=tu_api_secret_aqui
 
 # true = Testnet (dinero ficticio) | false = cuenta real
 TESTNET=true
 
-# Par a tradear
+# Par a tradear en los scripts de backtest single-symbol
 SYMBOL=BTCUSDT
 
 # Capital inicial disponible (en USDT)
 INITIAL_CAPITAL=100
+
+# Futures (USD-M) — usado por bot.py EN VIVO (largos y cortos, multi-símbolo).
+# Son keys DISTINTAS a las de Spot: generarlas en https://testnet.binancefuture.com
+BINANCE_FUTURES_API_KEY=tu_futures_api_key_aqui
+BINANCE_FUTURES_API_SECRET=tu_futures_api_secret_aqui
+FUTURES_TESTNET=true
+LEVERAGE=2
+MARGIN_TYPE=ISOLATED
+SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT
+MAX_CONCURRENT_POSITIONS=3
 ```
 
-> **Recomendado:** empieza con `TESTNET=true` para probar sin riesgo.
-> Obtén tus keys en: https://testnet.binance.vision (testnet) o en la configuración de API de Binance.
+> **Recomendado:** empieza con `TESTNET=true` y `FUTURES_TESTNET=true` para probar sin riesgo.
+> Spot testnet: https://testnet.binance.vision — Futures testnet: https://testnet.binancefuture.com
 
 Guarda el archivo: `Ctrl+O`, `Enter`, `Ctrl+X`.
 

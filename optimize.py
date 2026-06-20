@@ -1,12 +1,15 @@
 """
 Optimizador de estrategia — busca la configuracion mas rentable.
 Descarga klines una sola vez y prueba todas las combinaciones de parametros.
-Al terminar aplica automaticamente la configuracion ganadora a config.py.
+
+Por defecto NO modifica config.py: esta búsqueda es in-sample sobre todo el periodo,
+con riesgo real de curve-fitting. Antes de aplicar cualquier resultado, valídalo con
+walkforward.py (out-of-sample) y solo entonces usa --apply.
 
 Uso:
-    python optimize.py                     # 36 meses, 1000 USDT, top 15
+    python optimize.py                     # 36 meses, 1000 USDT, top 15 (no modifica config.py)
     python optimize.py --months 48 --top 10
-    python optimize.py --no-apply          # solo muestra resultados sin tocar config.py
+    python optimize.py --apply             # aplica la config ganadora a config.py (in-sample)
 """
 import asyncio
 import argparse
@@ -161,10 +164,10 @@ async def main(months: int, initial_balance: float, top_n: int, apply: bool) -> 
         config.RSI_BUY_MIN       = p.rsi_min
         config.RSI_BUY_MAX       = p.rsi_max
 
-        trades, bal_hist = run_backtest(
+        trades, bal_hist, time_in_market_pct = run_backtest(
             klines[p.interval], klines[p.htf_interval], initial_balance
         )
-        m = compute_metrics(trades, bal_hist, initial_balance, months)
+        m = compute_metrics(trades, bal_hist, initial_balance, months, time_in_market_pct)
         s = score(m)
         results.append((s, p, m))
 
@@ -233,16 +236,20 @@ async def main(months: int, initial_balance: float, top_n: int, apply: bool) -> 
         apply_to_config(best_p)
         print("  config.py actualizado con la configuracion ganadora.")
     else:
-        print("  (--no-apply: config.py no fue modificado)")
+        print("  (config.py NO fue modificado — esto es una búsqueda IN-SAMPLE sobre todo el periodo,")
+        print("   con alto riesgo de curve-fitting. Antes de aplicarla, valídala con:")
+        print(f"     python walkforward.py --months-total {months}")
+        print("   y aplica manualmente solo si se sostiene out-of-sample. Usa --apply para forzar.")
     print()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Optimizador de estrategia EMA")
-    parser.add_argument("--months",   type=int,   default=36,     help="Meses de historial (default: 36)")
-    parser.add_argument("--balance",  type=float, default=1000.0, help="Balance inicial USDT (default: 1000)")
-    parser.add_argument("--top",      type=int,   default=15,     help="Configs a mostrar (default: 15)")
-    parser.add_argument("--no-apply", action="store_true",        help="No modificar config.py")
+    parser.add_argument("--months",  type=int,   default=36,     help="Meses de historial (default: 36)")
+    parser.add_argument("--balance", type=float, default=1000.0, help="Balance inicial USDT (default: 1000)")
+    parser.add_argument("--top",     type=int,   default=15,     help="Configs a mostrar (default: 15)")
+    parser.add_argument("--apply",   action="store_true",
+                         help="Aplicar la config ganadora a config.py (in-sample — valida con walkforward.py primero)")
     args = parser.parse_args()
 
-    asyncio.run(main(args.months, args.balance, args.top, not args.no_apply))
+    asyncio.run(main(args.months, args.balance, args.top, args.apply))

@@ -41,8 +41,17 @@ from config import config
 from strategy import EMAStrategy
 from risk_manager import RiskManager
 
-SLIPPAGE = 0.001   # 0.1 % por orden de mercado (deslizamiento realista)
+SLIPPAGE = 0.001   # 0.1 % base por orden de mercado (deslizamiento en volatilidad normal)
+SLIPPAGE_CAP = 0.005  # techo de slippage en eventos de alta volatilidad (0.5 %)
 FEE      = 0.001   # 0.1 % comisión Binance por operación (maker/taker)
+
+
+def dynamic_slippage(current_atr: float | None, avg_atr: float | None) -> float:
+    """Slippage proporcional a la volatilidad relativa: en ATR alto el libro de órdenes
+    suele tener menos profundidad y el deslizamiento real es mayor que en mercado calmo."""
+    if not current_atr or not avg_atr or avg_atr <= 0:
+        return SLIPPAGE
+    return min(SLIPPAGE_CAP, SLIPPAGE * max(1.0, current_atr / avg_atr))
 
 
 # ──────────────────────────────────────────────────────────────────── #
@@ -65,6 +74,8 @@ class Trade:
     initial_qty:    float = 0.0   # qty original al entrar (para pnl_pct correcto tras scale-out)
     scale_out_pnl:  float = 0.0   # PnL cobrado en la salida parcial
     scale_out_done: bool  = False  # True tras ejecutar el scale-out (evita doble ejecución)
+    side:           str   = "LONG"  # LONG | SHORT (usado por backtest_futures.py)
+    funding_cost:   float = 0.0   # costo acumulado de funding (solo backtest_futures.py)
 
 
 # ──────────────────────────────────────────────────────────────────── #
@@ -106,7 +117,7 @@ def run_backtest(
     klines_1h: list,
     klines_4h: list,
     initial_balance: float,
-) -> tuple[List[Trade], List[float]]:
+) -> tuple[List[Trade], List[float], float]:
 
     strategy = EMAStrategy(
         config.EMA_FAST, config.EMA_SLOW, config.ATR_PERIOD,
@@ -114,10 +125,13 @@ def run_backtest(
         adx_period=config.ADX_PERIOD, adx_min=config.ADX_MIN,
         atr_vol_period=config.ATR_VOL_PERIOD,
         atr_vol_min_ratio=config.ATR_VOL_MIN_RATIO,
+        atr_vol_max_ratio=config.ATR_VOL_MAX_RATIO,
         er_period=config.REGIME_ER_PERIOD,
         er_min=config.REGIME_ER_MIN,
+        rsi_sell_min=config.RSI_SELL_MIN,
+        rsi_sell_max=config.RSI_SELL_MAX,
     )
-    htf_strategy = EMAStrategy(config.EMA_FAST, config.EMA_SLOW)  # HTF solo necesita is_bullish
+    htf_strategy = EMAStrategy(config.EMA_FAST, config.EMA_SLOW)  # HTF solo necesita is_bullish/is_bearish
     risk_manager = RiskManager()
 
     balance          = initial_balance
@@ -126,6 +140,8 @@ def run_backtest(
     current: Optional[Trade]   = None
     in_position                = False
     htf_ptr                    = 0
+    candles_in_position        = 0
+    candles_ready               = 0
 
     for k in klines_1h:
         open_time = int(k[0])
@@ -150,14 +166,19 @@ def run_backtest(
             balance_history.append(balance)
             continue
 
+        candles_ready += 1
+        if in_position:
+            candles_in_position += 1
+
         # ── Gestión intracandle: comprobar SL / TP ──
         if in_position and current:
             # ── Scale-out: tomar beneficios parciales al llegar a SCALE_OUT_R ──
             # Se comprueba ANTES del SL para capturar subidas antes de posibles retrocesos.
             if (config.SCALE_OUT_R > 0 and not current.scale_out_done
                     and current.atr > 0 and current.qty > 0):
+                so_mult = risk_manager.get_trailing_multiplier(strategy.current_adx)
                 so_price = (current.entry_price
-                            + config.SCALE_OUT_R * config.ATR_SL_MULTIPLIER * current.atr)
+                            + config.SCALE_OUT_R * so_mult * current.atr)
                 if high >= so_price:
                     partial_qty = round(current.qty * config.SCALE_OUT_RATIO, 5)
                     if partial_qty >= config.MIN_QUANTITY:
@@ -170,7 +191,9 @@ def run_backtest(
                         current.scale_out_done = True
 
             hit_sl = low <= current.sl
-            hit_tp = (not config.TRAILING_STOP) and (high >= current.tp)
+            # El TP fijo actúa como techo de seguridad incluso con trailing activo:
+            # antes, con TRAILING_STOP=True, nunca se evaluaba y ATR_TP_MULTIPLIER era código muerto.
+            hit_tp = high >= current.tp
 
             if hit_sl or hit_tp:
                 if hit_sl and hit_tp:
@@ -189,17 +212,20 @@ def run_backtest(
                 balance_history.append(balance)
                 continue
 
-            # ── Trailing stop: elevar SL siguiendo el precio de cierre ──
+            # ── Trailing stop: elevar SL siguiendo el precio de cierre, con multiplicador
+            # adaptado a la fuerza de tendencia actual (ADX) ──
             if config.TRAILING_STOP and strategy.current_atr:
-                new_sl = round(close - strategy.current_atr * config.ATR_SL_MULTIPLIER, 2)
+                trail_mult = risk_manager.get_trailing_multiplier(strategy.current_adx)
+                new_sl = round(close - strategy.current_atr * trail_mult, 2)
                 if new_sl > current.sl:
                     current.sl = new_sl
 
         # ── Señales de cruce ──
         signal = strategy.get_signal()
+        slip = dynamic_slippage(strategy.current_atr, strategy.avg_atr)
 
         if signal == "SELL" and in_position and current:
-            exit_price = close * (1 - SLIPPAGE)
+            exit_price = close * (1 - slip)
             fee = exit_price * current.qty * FEE
             pnl = (exit_price - current.entry_price) * current.qty - fee
             balance += pnl
@@ -207,10 +233,13 @@ def run_backtest(
             trades.append(current)
             in_position, current = False, None
 
-        elif signal == "BUY" and not in_position and htf_strategy.is_bullish and strategy.can_enter_long:
+        htf_ok = htf_strategy.is_bullish or config.ALLOW_BUY_IN_BEARISH_HTF
+        if signal == "BUY" and not in_position and htf_ok and strategy.can_enter_long:
             atr   = strategy.current_atr
-            entry = close * (1 + SLIPPAGE)
-            qty   = risk_manager.calculate_position_size(balance, entry, atr, strategy.vol_multiplier)
+            entry = close * (1 + slip)
+            qty   = risk_manager.calculate_position_size(
+                balance, entry, atr, strategy.vol_multiplier, strategy.current_adx
+            )
 
             if qty > 0:
                 balance -= entry * qty * FEE   # comisión de entrada
@@ -219,7 +248,7 @@ def run_backtest(
                     entry_price = round(entry, 2),
                     qty         = qty,
                     initial_qty = qty,
-                    sl          = risk_manager.get_stop_loss(entry, "BUY", atr),
+                    sl          = risk_manager.get_stop_loss(entry, "BUY", atr, strategy.current_adx),
                     tp          = risk_manager.get_take_profit(entry, "BUY", atr),
                     atr         = round(atr, 2) if atr else 0,
                 )
@@ -229,14 +258,15 @@ def run_backtest(
 
     # ── Cerrar posición abierta al final del periodo ──
     if in_position and current:
-        last_close = float(klines_1h[-1][4]) * (1 - SLIPPAGE)
+        last_close = float(klines_1h[-1][4]) * (1 - dynamic_slippage(strategy.current_atr, strategy.avg_atr))
         fee = last_close * current.qty * FEE
         pnl = (last_close - current.entry_price) * current.qty - fee
         balance += pnl
         _fill_trade(current, int(klines_1h[-1][0]), last_close, "FIN", pnl)
         trades.append(current)
 
-    return trades, balance_history
+    time_in_market_pct = (candles_in_position / candles_ready * 100) if candles_ready else 0.0
+    return trades, balance_history, time_in_market_pct
 
 
 def _fill_trade(t: Trade, open_time: int, exit_price: float, reason: str, pnl: float):
@@ -258,7 +288,10 @@ def _fmt(ms: int) -> str:
 # Cálculo de métricas                                                   #
 # ──────────────────────────────────────────────────────────────────── #
 
-def compute_metrics(trades: List[Trade], balance_history: list, initial_balance: float, months: int) -> dict:
+def compute_metrics(
+    trades: List[Trade], balance_history: list, initial_balance: float, months: int,
+    time_in_market_pct: float = 0.0,
+) -> dict:
     if not trades:
         return {}
 
@@ -285,6 +318,14 @@ def compute_metrics(trades: List[Trade], balance_history: list, initial_balance:
     std_r      = math.sqrt(variance) if variance > 0 else 0
     tpy        = len(trades) / months * 12
     sharpe     = (mean_r / std_r) * math.sqrt(tpy) if std_r > 0 else 0.0
+
+    # Sortino: como Sharpe pero solo penaliza la volatilidad de retornos negativos
+    # (Sharpe castiga igual las subidas grandes que las bajadas, lo que no tiene sentido
+    # para una estrategia trend-following donde los ganadores grandes son el objetivo).
+    downside = [min(r, 0.0) for r in ret_series]
+    down_var = sum(r ** 2 for r in downside) / max(len(downside) - 1, 1)
+    down_std = math.sqrt(down_var) if down_var > 0 else 0
+    sortino  = (mean_r / down_std) * math.sqrt(tpy) if down_std > 0 else 0.0
 
     # Calmar
     calmar = annual_return / max_dd if max_dd > 0 else float("inf")
@@ -315,7 +356,9 @@ def compute_metrics(trades: List[Trade], balance_history: list, initial_balance:
         total_return   = total_return,
         annual_return  = annual_return,
         sharpe         = sharpe,
+        sortino        = sortino,
         calmar         = calmar,
+        time_in_market = time_in_market_pct,
         max_losing     = max_losing,
         final_balance  = final_balance,
         by_reason      = by_reason,
@@ -381,10 +424,13 @@ def print_report(m: dict, initial_balance: float, months: int):
           f"[{_grade(m['max_drawdown'], 20, 40, higher_is_better=False)}]  (<20% bueno)")
     print(f"  Sharpe Ratio        : {m['sharpe']:>8.2f}      "
           f"[{_grade(m['sharpe'], 1.0, 0.5)}]  (>1.0 bueno)")
+    print(f"  Sortino Ratio       : {m['sortino']:>8.2f}      "
+          f"[{_grade(m['sortino'], 1.5, 0.8)}]  (>1.5 bueno; solo penaliza caídas)")
     print(f"  Calmar Ratio        : {m['calmar']:>8.2f}      "
           f"[{_grade(m['calmar'], 0.5, 0.2)}]  (>0.5 bueno)")
     print(f"  Expectativa/op      : {m['expectancy']:>+8.2f} USDT")
     print(f"  Racha pérd. consec. : {m['max_losing']:>8}  operaciones")
+    print(f"  Tiempo en mercado   : {m['time_in_market']:>8.1f} %")
 
     print(f"\n  {sep}")
     print("  TOP 5 MEJORES OPERACIONES")
@@ -425,8 +471,8 @@ def print_report(m: dict, initial_balance: float, months: int):
 # ──────────────────────────────────────────────────────────────────── #
 
 def save_csv(trades: List[Trade], path: str):
-    fields = ["entry_time", "entry_price", "qty", "sl", "tp", "atr",
-              "exit_time", "exit_price", "exit_reason", "pnl_usdt", "pnl_pct"]
+    fields = ["side", "entry_time", "entry_price", "qty", "sl", "tp", "atr",
+              "exit_time", "exit_price", "exit_reason", "pnl_usdt", "pnl_pct", "funding_cost"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
@@ -449,9 +495,9 @@ async def main(months: int, initial_balance: float, csv_path: Optional[str]):
     print(f"  -> {len(klines_4h):,} velas")
 
     print("Ejecutando simulación...\n")
-    trades, balance_history = run_backtest(klines_1h, klines_4h, initial_balance)
+    trades, balance_history, time_in_market_pct = run_backtest(klines_1h, klines_4h, initial_balance)
 
-    metrics = compute_metrics(trades, balance_history, initial_balance, months)
+    metrics = compute_metrics(trades, balance_history, initial_balance, months, time_in_market_pct)
     print_report(metrics, initial_balance, months)
 
     if csv_path and trades:

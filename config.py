@@ -5,13 +5,41 @@ load_dotenv()
 
 
 class Config:
-    # Binance API
+    # Binance Spot API (usada por los scripts de backtest single-symbol)
     API_KEY: str = os.getenv("BINANCE_API_KEY", "")
     API_SECRET: str = os.getenv("BINANCE_API_SECRET", "")
     TESTNET: bool = os.getenv("TESTNET", "true").lower() == "true"
 
+    # Binance Futures API — requiere keys propias de testnet.binancefuture.com,
+    # distintas de las de Spot. Si no se configuran, cae en las de Spot (no funcionará
+    # contra Futures Testnet real, pero permite que el resto del bot no rompa).
+    FUTURES_API_KEY:    str  = os.getenv("BINANCE_FUTURES_API_KEY", "") or API_KEY
+    FUTURES_API_SECRET: str  = os.getenv("BINANCE_FUTURES_API_SECRET", "") or API_SECRET
+    FUTURES_TESTNET:    bool = os.getenv("FUTURES_TESTNET", "true").lower() == "true"
+
+    # Apalancamiento y tipo de margen para Futuros (USD-M).
+    # El riesgo real por operación lo sigue definiendo RISK_PER_TRADE + distancia de SL;
+    # el leverage solo determina cuánto margen se bloquea, no cuánto se arriesga.
+    LEVERAGE:    int = int(os.getenv("LEVERAGE", "2"))
+    MARGIN_TYPE: str = os.getenv("MARGIN_TYPE", "ISOLATED")
+
+    # Estimación de liquidación (aproximada, ignora funding/PnL no realizado y tiers de
+    # margen de mantenimiento reales de Binance — solo sirve como red de seguridad para
+    # rechazar una entrada si el SL queda peligrosamente cerca del precio de liquidación).
+    MAINTENANCE_MARGIN_RATE:    float = 0.004   # ~0.4%, típico en tiers bajos de notional
+    LIQUIDATION_SAFETY_BUFFER:  float = 1.5     # la distancia a liquidación debe ser >= 1.5x la distancia al SL
+
     # Par y temporalidad
-    SYMBOL: str = os.getenv("SYMBOL", "BTCUSDT")
+    SYMBOL: str = os.getenv("SYMBOL", "BTCUSDT")          # usado por backtest.py (single-symbol)
+    SYMBOLS: list[str] = os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",")  # bot.py en vivo
+    MAX_CONCURRENT_POSITIONS: int = int(os.getenv("MAX_CONCURRENT_POSITIONS", "3"))
+
+    # Símbolos donde se permite abrir SHORT. Validado con backtest_futures.py (36-60 meses):
+    # en BTCUSDT los shorts tienen win rate ~19% y PF ~0.5 (pérdida neta consistente) incluso
+    # endureciendo ADX/RSI/ER — la señal death-cross+HTF-bajista no tiene ventaja real ahí.
+    # En ETHUSDT (PF 1.07) y SOLUSDT (PF 1.12) son neutros a levemente positivos.
+    # Revalidar con walkforward.py/backtest_futures.py antes de añadir BTCUSDT a esta lista.
+    SHORT_ENABLED_SYMBOLS: list[str] = os.getenv("SHORT_ENABLED_SYMBOLS", "ETHUSDT,SOLUSDT").split(",")
 
     # ── INTERVALO PRINCIPAL: 4H ──────────────────────────────────────────
     # El EMA crossover en 1H generaba 55+ señales anuales con solo 30% win rate
@@ -22,7 +50,13 @@ class Config:
     # Filtro HTF (Higher Time Frame): diario confirma la tendencia macro
     HTF_INTERVAL: str = "1d"
     HTF_LOOKBACK_CANDLES: int = 120     # EMA55 diario necesita 55+ velas; 120 da margen amplio
-    ALLOW_BUY_IN_BEARISH_HTF: bool = True  # permitir compras incluso si el HTF diario es bajista
+    # FALSE por defecto: con el bug de backtest-vs-live corregido (antes backtest.py exigía
+    # HTF alcista SIEMPRE, sin importar este flag, mientras bot.py sí lo respetaba — los
+    # resultados reportados no correspondían al comportamiento real en vivo), validé ambos
+    # valores con datos reales: True da Sharpe 0.18-0.50 y PF 1.08-1.25 (MEJORABLE);
+    # False da Sharpe 0.61-1.19 y PF 1.57-2.31 (ACEPTABLE/BUENA) en 36m y 60m.
+    # Comprar contra el HTF diario bajista con apalancamiento castiga el rendimiento.
+    ALLOW_BUY_IN_BEARISH_HTF: bool = False
 
     # Parámetros EMA — mismos periodos, ahora sobre velas 4H
     EMA_FAST: int = 9
@@ -31,33 +65,55 @@ class Config:
     # Gestión de riesgo
     RISK_PER_TRADE: float = 0.005        # 0.5% del balance por operación
     ATR_PERIOD: int = 14
-    ATR_SL_MULTIPLIER: float = 2.5       # SL = entrada - 2.5×ATR
-    ATR_TP_MULTIPLIER: float = 4.0       # TP fijo (solo si TRAILING_STOP=False)
+    ATR_SL_MULTIPLIER: float = 2.5       # SL = entrada ∓ 2.5×ATR (fallback si no hay régimen ADX)
+    ATR_TP_MULTIPLIER: float = 4.0       # TP fijo — actúa como techo de seguridad aunque TRAILING_STOP=True
     MIN_QUANTITY: float = 0.00001        # mínimo real de Binance BTCUSDT spot (stepSize)
     TRAILING_STOP_MIN_MOVE: float = 0.005  # mover trailing stop solo si sube ≥0.5% del precio
+
+    # Trailing stop adaptativo por fuerza de tendencia (ADX):
+    # tendencia fuerte → stop más ancho (deja correr al ganador); mercado débil/choppy → stop más ajustado.
+    ATR_SL_MULTIPLIER_TREND: float = 3.0   # usado cuando ADX >= ADX_TREND_THRESHOLD
+    ATR_SL_MULTIPLIER_CHOP:  float = 2.0   # usado cuando ADX < ADX_TREND_THRESHOLD
+    ADX_TREND_THRESHOLD:     float = 25.0
 
     # Trailing stop: mueve el SL hacia arriba con cada cierre de vela.
     # En live, cancela el stop-limit anterior y coloca uno nuevo cuando sube ≥0.5%.
     TRAILING_STOP: bool = True
 
-    # Filtros de entrada
+    # Filtros de entrada — largos
     RSI_BUY_MIN: float = 40.0           # evitar entradas en zonas muy sobrevendidas (lateral)
     RSI_BUY_MAX: float = 80.0           # en tendencias fuertes RSI 70-80 = momentum válido
+
+    # Filtros de entrada — cortos (espejo de los de largo)
+    RSI_SELL_MIN: float = 20.0          # evitar shorts en sobreventa extrema (riesgo de rebote)
+    RSI_SELL_MAX: float = 60.0          # en tendencias bajistas fuertes RSI 40-60 = momentum válido
+
     ADX_PERIOD: int = 14
-    ADX_MIN: float = 0               # solo operar cuando hay momentum (ADX > 15)
+    # walkforward.py (48 meses, train12/test3) probó ADX_MIN en [0,15,20,25] y la combinación
+    # ganadora out-of-sample fue casi siempre 0 (filtro desactivado) — el filtro ER
+    # (REGIME_ER_MIN) ya cubre la detección de mercado lateral sin necesitar el de ADX.
+    # Re-ejecutar walkforward.py periódicamente con datos nuevos para revalidar este valor.
+    ADX_MIN: float = 0.0
 
     # Normalización de volatilidad — mejora Sharpe ratio
     ATR_VOL_PERIOD: int = 50       # EMA para calcular ATR promedio histórico
     ATR_VOL_MIN_RATIO: float = 0.5 # no entrar si ATR < 50% del promedio (mercado muy quieto)
+    ATR_VOL_MAX_RATIO: float = 3.0 # kill-switch: no entrar si ATR > 300% del promedio (evento extremo)
     # vol_multiplier = min(1.0, avg_atr / current_atr): reduce posición en alta volatilidad
 
     # Toma parcial de beneficios (scale-out)
     # Al llegar a SCALE_OUT_R × riesgo inicial, cerrar SCALE_OUT_RATIO de la posición
     # y mover el stop al break-even. Con SCALE_OUT_R=3.0 y SL_MULT=2.5 → trigger en 7.5×ATR
-    # DESACTIVADO (=0.0): EMA crossover con 35% win-rate necesita que los ganadores corran;
-    # cualquier R probado (3-15) reduce Sharpe porque recorta la media más que la varianza.
+    # Calibrar con walkforward.py (out-of-sample) antes de fijar el valor final: el comentario
+    # previo decía que cualquier R reducía Sharpe, pero esa prueba fue sin el filtro ADX/ER
+    # activado — puede que cambien las conclusiones.
     SCALE_OUT_R:     float = 0.0   # 0 = desactivado | >0 = activo (múltiplos de R)
     SCALE_OUT_RATIO: float = 0.5   # fracción de la posición a cerrar (0.5 = 50 %)
+
+    # Estimación de costo de funding en Futuros (se cobra/paga cada 8h sobre el notional).
+    # Usado solo en backtest_futures.py para no sobreestimar el rendimiento de mantener
+    # posiciones abiertas varios días en Futuros.
+    FUNDING_RATE_ASSUMPTION: float = 0.0001   # 0.01% por periodo de 8h (valor típico histórico)
 
     # Filtro de régimen: Efficiency Ratio (detecta mercados laterales/choppy)
     # ER = |movimiento neto en N velas| / |suma de movimientos individuales|
@@ -71,8 +127,12 @@ class Config:
     TELEGRAM_TOKEN:   str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID",   "")
 
-    # Circuit breaker mensual
+    # Circuit breakers
     MAX_MONTHLY_DRAWDOWN: float = 0.08
+    MAX_DAILY_DRAWDOWN:   float = 0.04   # pérdida máxima diaria (UTC) antes de pausar el día
+    MAX_TRADES_PER_DAY:   int   = 4      # tope de aperturas nuevas por día, entre todos los símbolos
+    COOLDOWN_AFTER_LOSSES: int  = 3      # pérdidas consecutivas que activan el cooldown
+    COOLDOWN_HOURS:        float = 12.0  # horas sin abrir posiciones nuevas tras el cooldown
 
 
 config = Config()

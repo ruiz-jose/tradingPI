@@ -37,9 +37,12 @@ El bot usa un filtro de tendencia en un marco temporal mayor:
 
 ### Condición para operar BUY
 
-- En la configuración actual, el bot puede operar BUY incluso si el HTF está `bajista`.
-- Antes, el HTF bajista hacía que el bot omitiese la entrada.
-- Si se desea, esta regla puede desactivarse cambiando `ALLOW_BUY_IN_BEARISH_HTF` a `False`.
+- `ALLOW_BUY_IN_BEARISH_HTF = False` (default): si el HTF diario está `bajista`, el bot omite la entrada BUY.
+- Validado con backtest.py (36 y 60 meses): permitir BUY en HTF bajista (`True`) reduce el Sharpe
+  de ~1.19 a ~0.50 y el Profit Factor de ~2.31 a ~1.25 — comprar contra la tendencia diaria con
+  apalancamiento castiga el rendimiento. Antes había una discrepancia donde bot.py respetaba este
+  flag pero backtest.py exigía HTF alcista siempre sin importar su valor; ya está corregido en
+  ambos lados.
 
 ## 4. Filtros adicionales de entrada
 
