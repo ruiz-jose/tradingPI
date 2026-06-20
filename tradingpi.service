@@ -1,0 +1,28 @@
+# Servicio systemd para Raspberry Pi
+# Instalación:
+#   sudo cp tradingpi.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable tradingpi
+#   sudo systemctl start tradingpi
+#
+# Ver logs:
+#   sudo journalctl -u tradingpi -f
+
+[Unit]
+Description=Trading Bot Binance - EMA Crossover
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jruiz
+WorkingDirectory=/home/jruiz/tradingPI
+EnvironmentFile=/home/jruiz/tradingPI/.env
+ExecStart=/home/jruiz/tradingPI/venv/bin/python3 /home/jruiz/tradingPI/bot.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

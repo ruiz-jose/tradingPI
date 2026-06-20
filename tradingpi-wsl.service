@@ -1,0 +1,31 @@
+# Servicio systemd para WSL 2 con systemd habilitado
+# Requiere: /etc/wsl.conf con [boot] systemd=true
+#
+# Instalación:
+#   1. Sustituye USUARIO por tu usuario WSL (ejecuta: whoami)
+#   2. sudo cp tradingpi-wsl.service /etc/systemd/system/tradingpi.service
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable tradingpi
+#   5. sudo systemctl start tradingpi
+#
+# Ver logs:
+#   sudo journalctl -u tradingpi -f
+
+[Unit]
+Description=Trading Bot Binance - EMA Crossover (WSL)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=USUARIO
+WorkingDirectory=/home/USUARIO/tradingPI
+EnvironmentFile=/home/USUARIO/tradingPI/.env
+ExecStart=/home/USUARIO/tradingPI/venv/bin/python3 /home/USUARIO/tradingPI/bot.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
