@@ -44,7 +44,7 @@ class Config:
     # ── INTERVALO PRINCIPAL: 4H ──────────────────────────────────────────
     # El EMA crossover en 1H generaba 55+ señales anuales con solo 30% win rate
     # (puro ruido de mercado). En 4H, genera ~6-10 señales anuales con 50% win rate.
-    INTERVAL: str = "4h"
+    INTERVAL: str = "8h"
     LOOKBACK_CANDLES: int = 100   # EMA 55 + ATR 14 + margen extra
 
     # Filtro HTF (Higher Time Frame): diario confirma la tendencia macro
@@ -66,14 +66,14 @@ class Config:
     RISK_PER_TRADE: float = 0.005        # 0.5% del balance por operación
     ATR_PERIOD: int = 14
     ATR_SL_MULTIPLIER: float = 2.5       # SL = entrada ∓ 2.5×ATR (fallback si no hay régimen ADX)
-    ATR_TP_MULTIPLIER: float = 4.0       # TP fijo — actúa como techo de seguridad aunque TRAILING_STOP=True
+    ATR_TP_MULTIPLIER: float = 5.0       # TP fijo — actúa como techo de seguridad aunque TRAILING_STOP=True
     MIN_QUANTITY: float = 0.00001        # mínimo real de Binance BTCUSDT spot (stepSize)
     TRAILING_STOP_MIN_MOVE: float = 0.005  # mover trailing stop solo si sube ≥0.5% del precio
 
     # Trailing stop adaptativo por fuerza de tendencia (ADX):
     # tendencia fuerte → stop más ancho (deja correr al ganador); mercado débil/choppy → stop más ajustado.
-    ATR_SL_MULTIPLIER_TREND: float = 3.0   # usado cuando ADX >= ADX_TREND_THRESHOLD
-    ATR_SL_MULTIPLIER_CHOP:  float = 2.0   # usado cuando ADX < ADX_TREND_THRESHOLD
+    ATR_SL_MULTIPLIER_TREND: float = 2.5   # usado cuando ADX >= ADX_TREND_THRESHOLD
+    ATR_SL_MULTIPLIER_CHOP:  float = 1.5   # usado cuando ADX < ADX_TREND_THRESHOLD
     ADX_TREND_THRESHOLD:     float = 25.0
 
     # Trailing stop: mueve el SL hacia arriba con cada cierre de vela.
@@ -136,7 +136,7 @@ class Config:
     # ER = |movimiento neto en N velas| / |suma de movimientos individuales|
     # ER → 1.0 = tendencia limpia; ER → 0.0 = lateral/ruidoso
     # REGIME_ER_MIN = 0 desactiva el filtro
-    REGIME_ER_PERIOD: int   = 10    # ventana de cálculo (10 × 4H ≈ 1.7 días)
+    REGIME_ER_PERIOD: int   = 12    # ventana de cálculo (10 × 4H ≈ 1.7 días)
     REGIME_ER_MIN:    float = 0.2   # umbral mínimo para considerar mercado trending
 
     # Mean-reversion para los periodos laterales/choppy (ER < REGIME_ER_MIN), probada en

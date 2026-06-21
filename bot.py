@@ -24,7 +24,8 @@ from notifier import (
 
 log = logging.getLogger(__name__)
 
-_INTERVAL_SECONDS = {"1h": 3600, "4h": 14400, "1d": 86400}
+_INTERVAL_SECONDS = {"1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "8h": 28800, "12h": 43200, "1d": 86400}
+
 
 
 @dataclass
