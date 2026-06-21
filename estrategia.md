@@ -1,102 +1,183 @@
 # Estrategia del bot
 
-Este documento describe cuándo el bot decide operar y qué condiciones debe cumplir antes de abrir una posición.
+Este documento describe qué hace el bot, cómo decide entrar/salir, qué gestión de riesgo
+aplica, y qué resultados de validación respaldan (o descartan) cada decisión de diseño.
+Es trend-following sobre EMA crossover, con filtros de régimen, gestión de riesgo basada en
+ATR, y circuit breakers — corre sobre Binance Futures (USD-M), multi-símbolo, con largos y
+cortos. Cada elección de parámetro relevante fue validada con `backtest.py`, `backtest_multi.py`,
+`backtest_futures.py` o `walkforward.py`, no por intuición.
 
-## 1. Marco temporal principal
+## 1. Dónde opera
 
-- El bot trabaja con velas de `4h` como intervalo principal (`config.INTERVAL = "4h"`).
-- Las decisiones de entrada se toman al cierre de una vela de `4h`.
+- **Exchange**: Binance Futures USD-M (`bot.py`), modo de margen `ISOLATED`, apalancamiento `LEVERAGE = 2x`.
+- **Símbolos en vivo**: `SYMBOLS = BTCUSDT, ETHUSDT, SOLUSDT` — uno corre independiente del otro,
+  compartiendo un solo balance de cuenta y un cap de `MAX_CONCURRENT_POSITIONS = 3` posiciones abiertas.
+- **Intervalo principal**: `INTERVAL = 4h`. Probado contra `1h` y `2h` con los mismos filtros — ambos
+  dieron Sharpe negativo y PF < 1.1 (mucho ruido, sin edge). 4h es el único timeframe validado.
+- **Filtro HTF (Higher Time Frame)**: `HTF_INTERVAL = 1d`, misma EMA 9/21 sobre velas diarias, para
+  confirmar la tendencia macro antes de operar el timeframe principal.
 
-## 2. Señales de entrada
+## 2. Señal base: EMA Crossover 9/21
 
-La estrategia genera señales basadas en medias móviles exponenciales (EMA):
+- `EMA_FAST = 9`, `EMA_SLOW = 21`, evaluadas al cierre de cada vela de 4h.
+- **BUY** (golden cross): la EMA rápida cruza por encima de la lenta.
+- **SELL** (death cross): la EMA rápida cruza por debajo de la lenta.
+- Sin cruce → `HOLD`.
 
-- `EMA_FAST = 9`
-- `EMA_SLOW = 21`
+## 3. Largos y cortos
 
-### 2.1 Señal BUY
+El bot puede abrir tanto `LONG` como `SHORT`, pero no de forma simétrica — los shorts están
+restringidos por símbolo según lo que muestra la evidencia:
 
-Se produce una señal `BUY` cuando ocurre un cruce dorado en el cierre de la vela:
-- la EMA rápida (`EMA_FAST`) cruza por encima de la EMA lenta (`EMA_SLOW`).
+- **LONG**: señal BUY + HTF diario alcista + filtros de la sección 4.
+- **SHORT**: señal SELL + HTF diario bajista + filtros simétricos (RSI 20-60 en vez de 40-80)
+  + **el símbolo debe estar en `SHORT_ENABLED_SYMBOLS`**.
 
-### 2.2 Señal SELL
+### Por qué BTCUSDT no tiene shorts habilitados
 
-Se produce una señal `SELL` cuando ocurre un cruce bajista:
-- la EMA rápida cruza por debajo de la EMA lenta.
+`SHORT_ENABLED_SYMBOLS = ETHUSDT, SOLUSDT` (BTCUSDT excluido). Validado con `backtest_futures.py`
+(36 y 60 meses) y un sweep de 10 combinaciones de filtros (ADX 15/20/25, RSI-sell más estricto,
+ER 0.35/0.5, combinados):
 
-### 2.3 Señal HOLD
+| Símbolo | Win rate SHORT | PF SHORT |
+|---|---|---|
+| BTCUSDT | ~19% | ~0.5 (pérdida neta consistente, en todas las variantes de filtro probadas) |
+| ETHUSDT | ~32% | ~1.07 |
+| SOLUSDT | ~33% | ~1.12 |
 
-Si no hay cruce relevante, la señal es `HOLD`.
+La señal death-cross + HTF-bajista no tiene ventaja real para shortear BTC en el periodo
+analizado (sesgo alcista estructural); en ETH/SOL es neutra a levemente positiva. Revalidar
+con `backtest_futures.py` antes de añadir BTCUSDT a la lista.
 
-## 3. Filtro HTF (Higher Time Frame)
+## 4. Filtros de entrada (largos y cortos)
 
-El bot usa un filtro de tendencia en un marco temporal mayor:
+Una señal de cruce no basta — debe pasar todos estos filtros (`can_enter_long` / `can_enter_short`
+en `strategy.py`):
 
-- `HTF_INTERVAL = "1d"` (diario)
-- El HTF se actualiza periódicamente y su tendencia se determina con las mismas EMAs (9 y 21) sobre velas diarias.
+1. **RSI dentro de rango**:
+   - Largos: `RSI_BUY_MIN=40.0` – `RSI_BUY_MAX=80.0`
+   - Cortos: `RSI_SELL_MIN=20.0` – `RSI_SELL_MAX=60.0`
+2. **ADX mínimo** (`ADX_MIN = 0.0`, **desactivado**): `walkforward.py` (48 meses, train12/test3,
+   8 folds out-of-sample) probó ADX_MIN en [0, 15, 20, 25] — la combinación ganadora out-of-sample
+   fue casi siempre 0. El filtro ER (punto 4) ya cubre la detección de mercado lateral; activar ADX
+   además solo recorta operaciones sin mejorar el Sharpe real. Revalidar periódicamente con datos nuevos.
+3. **Régimen de volatilidad normal** (`ATR_VOL_MIN_RATIO=0.5`, `ATR_VOL_MAX_RATIO=3.0`): no entra si
+   `current_atr` es menor al 50% del promedio histórico (mercado muerto) NI mayor al 300% (evento
+   extremo / flash-crash, donde el sizing por ATR normal subestima el riesgo real — kill-switch).
+4. **Mercado trending** (`REGIME_ER_MIN=0.2`, Efficiency Ratio): se requiere `current_er >= 0.2`.
+   ER mide `|movimiento neto| / |suma de movimientos individuales|` — cerca de 1.0 es tendencia
+   limpia, cerca de 0.0 es lateral/ruidoso. Este es el filtro de régimen que de verdad importa.
 
-### Condición para operar BUY
+### Filtro HTF
 
-- `ALLOW_BUY_IN_BEARISH_HTF = False` (default): si el HTF diario está `bajista`, el bot omite la entrada BUY.
-- Validado con backtest.py (36 y 60 meses): permitir BUY en HTF bajista (`True`) reduce el Sharpe
-  de ~1.19 a ~0.50 y el Profit Factor de ~2.31 a ~1.25 — comprar contra la tendencia diaria con
-  apalancamiento castiga el rendimiento. Antes había una discrepancia donde bot.py respetaba este
-  flag pero backtest.py exigía HTF alcista siempre sin importar su valor; ya está corregido en
-  ambos lados.
+- `ALLOW_BUY_IN_BEARISH_HTF = False`: si el HTF diario no confirma la dirección (bajista para LONG,
+  alcista para SHORT), la entrada se omite — no se opera contra-tendencia diaria.
+- Validado con `backtest.py` (36 y 60 meses): permitir BUY en HTF bajista (`True`) da Sharpe 0.18-0.50
+  y PF 1.08-1.25; con `False` (default) da Sharpe 0.61-1.19 y PF 1.57-2.31. Comprar contra el HTF
+  diario con apalancamiento castiga el rendimiento de forma consistente en ambas ventanas.
+- *Nota histórica*: hasta hace poco había una discrepancia donde `bot.py` respetaba este flag pero
+  `backtest.py` exigía HTF alcista siempre sin importar su valor — los backtests reportados no
+  correspondían al comportamiento real en vivo. Ya está corregido en ambos lados.
 
-## 4. Filtros adicionales de entrada
+## 5. Mean-reversion (probado, descartado)
 
-Además del cruce de EMAs y del HTF alcista, el bot exige que la estrategia principal pase estos filtros:
+Se construyó un motor adicional (`mr_long_signal` / `mr_short_signal` en `strategy.py`,
+`backtest_hybrid.py`) que abre operaciones de reversión a la media (RSI extremo) específicamente
+en los periodos que el filtro ER marca como laterales — mutuamente excluyente con la señal de
+tendencia por construcción, para intentar operar también cuando la EMA crossover no tiene edge.
 
-1. RSI dentro del rango de compra:
-   - `RSI_BUY_MIN = 40.0`
-   - `RSI_BUY_MAX = 80.0`
+**`MR_ENABLED = False`**. Se probaron 5 combinaciones de RSI/SL/TP en BTC, ETH y SOL (36 meses):
+en todas, el motor MR resultó neutro o negativo, y entre más permisivo el umbral peor el resultado
+(hasta -16% de retorno con RSI 40/60 en BTC). RSI extremo dentro de un régimen ER-lateral no predice
+reversión a la media en 4H para estos símbolos con esta implementación. El código queda disponible
+para una futura iteración con una señal distinta (Bollinger Bands, confirmación por volumen) — no
+activar sin revalidar con `backtest_hybrid.py` + `walkforward.py`.
 
-2. ADX mínimo (si está activo):
-   - `ADX_MIN = 0` en tu configuración actual, por lo que el ADX no bloquea operaciones.
-   - Si ADX estuviera activado (> 0), se requeriría `current_adx >= ADX_MIN`.
+## 6. Gestión de riesgo y salida
 
-3. Régimen de volatilidad normal:
-   - El bot compara el ATR actual contra un ATR promedio histórico.
-   - `ATR_VOL_MIN_RATIO = 0.5`
-   - No entra si `current_atr < ATR_VOL_MIN_RATIO * avg_atr`.
+### Sizing (independiente del apalancamiento)
 
-4. Mercado trending según Efficiency Ratio (ER):
-   - `REGIME_ER_MIN = 0.2`
-   - Se requiere `current_er >= 0.2` para considerar el mercado con tendencia limpia.
+`RiskManager.calculate_position_size()`: arriesga `RISK_PER_TRADE = 0.5%` del balance por operación,
+con distancia de stop = ATR × multiplicador adaptativo (ver abajo), y reducido por `vol_multiplier`
+(`min(1.0, avg_atr/current_atr)`, reduce tamaño en alta volatilidad). El `LEVERAGE` (2x) solo
+determina cuánto margen se bloquea en Binance, no cuánto USDT se arriesga — esa separación es
+deliberada para no acoplar riesgo a apalancamiento.
 
-## 5. Gestión de riesgo antes de abrir posición
+### Trailing stop adaptativo por ADX
 
-Antes de crear una orden, el bot verifica:
+En vez de un multiplicador de ATR fijo, `get_trailing_multiplier()` usa:
+- `ATR_SL_MULTIPLIER_TREND = 3.0` cuando `ADX >= ADX_TREND_THRESHOLD (25)` — tendencia fuerte,
+  stop más ancho para no cortar al ganador antes de tiempo.
+- `ATR_SL_MULTIPLIER_CHOP = 2.0` cuando ADX está por debajo — mercado débil, protege beneficios antes.
 
-- Si el drawdown mensual supera `MAX_MONTHLY_DRAWDOWN = 0.08` (8 %), no opera.
-- Calcula el tamaño de posición con `RiskManager.calculate_position_size(...)`.
-- Si el resultado `qty <= 0`, la orden se omite.
+### Take-profit como techo de seguridad
 
-## 6. Resumen de condiciones para abrir BUY
+`ATR_TP_MULTIPLIER = 4.0`: con `TRAILING_STOP=True`, el TP fijo se sigue evaluando como techo de
+seguridad (antes era código muerto que nunca se alcanzaba — bug corregido). El trailing normalmente
+cierra antes si el precio retrocede, pero el TP fijo cierra si el movimiento es tan favorable que
+llega a ese nivel igual.
 
-El bot abre una orden `BUY` sólo si se cumplen todas estas condiciones:
+### Scale-out
 
-1. Señal principal = `BUY`.
-2. No existen posiciones abiertas (`not self.in_position`).
-3. HTF diario es `alcista`.
-4. `current_rsi` entre 40 y 80.
-5. Si ADX está activo: `current_adx >= ADX_MIN`.
-6. ATR actual en régimen normal: `current_atr >= ATR_VOL_MIN_RATIO * avg_atr`.
-7. Mercado trending: `current_er >= REGIME_ER_MIN`.
-8. No hay drawdown mensual superior a 8 %.
-9. El tamaño de posición calculado es positivo.
+`SCALE_OUT_R = 0.0` (**desactivado**). Soportado en el código (toma parcial de beneficios a
+`SCALE_OUT_R × ATR` y mueve el stop a break-even), pero no se encontró una combinación que mejorase
+el Sharpe de forma consistente al validarlo. Revisar con `walkforward.py` si se ajustan otros parámetros.
 
-## 7. Mensajes de log relevantes
+### Liquidación (Futuros)
 
-Estos son los mensajes que indican acción o bloqueo:
+`RiskManager.is_sl_safe_from_liquidation()`: antes de abrir cualquier posición, se estima el precio
+de liquidación (aproximado, ISOLATED, ignora funding/tiers reales — `MAINTENANCE_MARGIN_RATE = 0.4%`)
+y se exige que la distancia a liquidación sea `>= LIQUIDATION_SAFETY_BUFFER (1.5x)` la distancia al
+SL. Si no se cumple, la entrada se aborta — red de seguridad, no un cálculo exacto de margen.
 
-- `WebSocket activo. Esperando señales...` → el bot está recibiendo datos.
-- `HTF [1d] actualizado (...) : bajista` → el filtro diario está bajista.
-- `HTF [1d] bajista — BUY omitido (señal en contratendencia)` → la señal BUY se rechazó porque el HTF no estaba alcista.
-- `Filtros no superados — BUY omitido | RSI: ... | ADX: ...` → no pasó los filtros de RSI/ADX/regimen.
-- `COMPRA ejecutada | Qty: ... | Precio: ...` → el bot abrió una posición BUY.
+## 7. Circuit breakers y límites operativos
 
-## 8. Conclusión
+- **Mensual**: `MAX_MONTHLY_DRAWDOWN = 8%` — pausa todas las entradas hasta el próximo mes si el
+  balance cae ese % desde el inicio del mes.
+- **Diario**: `MAX_DAILY_DRAWDOWN = 4%` — igual que el mensual pero por día UTC.
+- **Máximo de operaciones por día**: `MAX_TRADES_PER_DAY = 4`, contado entre todos los símbolos.
+- **Cooldown tras pérdidas consecutivas**: `COOLDOWN_AFTER_LOSSES = 3` pérdidas seguidas (en
+  cualquier símbolo) activan `COOLDOWN_HOURS = 12` horas sin abrir ninguna posición nueva.
 
-El bot opera sólo cuando hay una señal de cruce EMA en el intervalo principal y cuando el contexto diario y los filtros de volatilidad, RSI y ER permiten la entrada. Si el HTF está bajista o algún filtro no se cumple, el bot no abre la operación.
+Todos generan notificación por Telegram (`msg_circuit_breaker`, `msg_cooldown`).
+
+## 8. Resultados de validación (resumen)
+
+| Validación | Periodo | PF | Sharpe | Max DD | Veredicto |
+|---|---|---|---|---|---|
+| `backtest.py` (BTC, long-only) | 36m | 2.31 | 1.19 | 2.8% | BUENA (4/5) |
+| `backtest.py` (BTC, long-only) | 60m | 1.57 | 0.61 | 2.8% | ACEPTABLE (3/5) |
+| `backtest_multi.py` (BTC+ETH+SOL) | 36m | — | 0.79 | 5.8% | ACEPTABLE (2/4) |
+| `walkforward.py` (out-of-sample, BTC) | 60m | 2.96 | 0.26 | — | confirma edge, Sharpe débil |
+
+**Lectura honesta**: gestión de riesgo de nivel profesional (drawdown siempre bajo, 2.8-5.8% en
+todas las pruebas) con edge direccional modesto y baja frecuencia de operación (~1-2 trades/mes en
+BTC 4h). El Sharpe nunca alcanza el estándar "bueno" (≥1.0) fuera de la ventana más favorable. Se
+probaron dos vías para mejorar esto (timeframes más cortos, mean-reversion en lateral) — ambas
+fueron descartadas empíricamente (secciones 1 y 5). El techo actual de la estrategia parece más
+estructural que un problema de calibración de parámetros.
+
+## 9. Mensajes de log relevantes
+
+- `[<symbol>] WebSocket Futures activo. Esperando señales...` → el bot está recibiendo datos para ese símbolo.
+- `[<symbol>] HTF actualizado (...) : bajista` → el filtro diario está bajista para ese símbolo.
+- `[<symbol>] HTF bajista — LONG omitido (contratendencia)` / `HTF no bajista — SHORT omitido` → entrada rechazada por el filtro HTF.
+- `[<symbol>] Filtros no superados — LONG/SHORT omitido | RSI: ... | ADX: ...` → no pasó RSI/ADX/régimen.
+- `[<symbol>] Shorts deshabilitados para este símbolo` → señal SHORT rechazada por `SHORT_ENABLED_SYMBOLS`.
+- `[<symbol>] LONG/SHORT ABORTADO — SL demasiado cerca del precio de liquidación` → red de seguridad de liquidación activada.
+- `[<symbol>] LONG/SHORT ejecutado | Qty: ... | SL: ... | TP: ...` → posición abierta.
+- `COOLDOWN activado tras N pérdidas consecutivas` / `CIRCUIT BREAKER: drawdown ... — operaciones suspendidas` → límites operativos activados.
+
+## 10. Resumen de condiciones para abrir una posición
+
+1. No hay cooldown activo y no se alcanzó `MAX_TRADES_PER_DAY`.
+2. Señal de cruce EMA (BUY o SELL) en el cierre de la vela de 4h.
+3. No hay posición abierta en ese símbolo, y no se alcanzó `MAX_CONCURRENT_POSITIONS` global.
+4. HTF diario confirma la dirección (o `ALLOW_BUY_IN_BEARISH_HTF` lo permite — desactivado por default).
+5. Si es SHORT: el símbolo está en `SHORT_ENABLED_SYMBOLS`.
+6. RSI en rango (largo o corto según corresponda) + régimen ATR normal + mercado trending (ER) + ADX (si está activo).
+7. No hay drawdown mensual ni diario por encima de sus límites.
+8. El tamaño de posición calculado es positivo.
+9. La distancia al SL es segura frente al precio de liquidación estimado.
+
+Si cualquiera de estas condiciones falla, el bot no abre la operación.

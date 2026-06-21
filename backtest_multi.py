@@ -130,6 +130,8 @@ def run_portfolio_backtest(
             er_min=config.REGIME_ER_MIN,
             rsi_sell_min=config.RSI_SELL_MIN,
             rsi_sell_max=config.RSI_SELL_MAX,
+            mr_rsi_oversold=config.MR_RSI_OVERSOLD,
+            mr_rsi_overbought=config.MR_RSI_OVERBOUGHT,
         )
         htf_strategy = EMAStrategy(config.EMA_FAST, config.EMA_SLOW)
         pairs.append(PairState(

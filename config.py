@@ -122,6 +122,20 @@ class Config:
     REGIME_ER_PERIOD: int   = 10    # ventana de cálculo (10 × 4H ≈ 1.7 días)
     REGIME_ER_MIN:    float = 0.2   # umbral mínimo para considerar mercado trending
 
+    # Mean-reversion para los periodos laterales/choppy (ER < REGIME_ER_MIN), probada en
+    # backtest_hybrid.py como complemento no correlacionado a la EMA crossover de tendencia.
+    # DESACTIVADA por defecto: validado en BTC/ETH/SOL (36 meses) con 5 combinaciones de
+    # RSI/SL/TP — en TODAS, el motor MR resultó neutro o negativo, y entre más permisivo el
+    # umbral, peor (hasta -16% de retorno en RSI 40/60). RSI extremo en régimen ER lateral
+    # no predice reversión a la media en 4H para estos símbolos con esta implementación.
+    # El código queda disponible para futuras iteraciones (ej. Bollinger Bands, confirmación
+    # por volumen) — no activar sin volver a validar con backtest_hybrid.py + walkforward.py.
+    MR_ENABLED:           bool  = False
+    MR_RSI_OVERSOLD:      float = 25.0   # RSI <= esto en régimen lateral -> long de reversión
+    MR_RSI_OVERBOUGHT:    float = 75.0   # RSI >= esto en régimen lateral -> short de reversión
+    MR_SL_ATR_MULTIPLIER: float = 1.5    # stop más ajustado que el de tendencia (trade más corto)
+    MR_TP_ATR_MULTIPLIER: float = 2.0    # objetivo de retorno a la media, no se deja correr
+
     # Notificaciones Telegram
     # Obtén el token con @BotFather y el chat_id con @userinfobot
     TELEGRAM_TOKEN:   str = os.getenv("TELEGRAM_BOT_TOKEN", "")

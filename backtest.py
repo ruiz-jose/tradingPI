@@ -76,6 +76,7 @@ class Trade:
     scale_out_done: bool  = False  # True tras ejecutar el scale-out (evita doble ejecución)
     side:           str   = "LONG"  # LONG | SHORT (usado por backtest_futures.py)
     funding_cost:   float = 0.0   # costo acumulado de funding (solo backtest_futures.py)
+    engine:         str   = "TREND"  # TREND | MR (usado por backtest_hybrid.py)
 
 
 # ──────────────────────────────────────────────────────────────────── #
@@ -130,6 +131,8 @@ def run_backtest(
         er_min=config.REGIME_ER_MIN,
         rsi_sell_min=config.RSI_SELL_MIN,
         rsi_sell_max=config.RSI_SELL_MAX,
+        mr_rsi_oversold=config.MR_RSI_OVERSOLD,
+        mr_rsi_overbought=config.MR_RSI_OVERBOUGHT,
     )
     htf_strategy = EMAStrategy(config.EMA_FAST, config.EMA_SLOW)  # HTF solo necesita is_bullish/is_bearish
     risk_manager = RiskManager()
@@ -471,7 +474,7 @@ def print_report(m: dict, initial_balance: float, months: int):
 # ──────────────────────────────────────────────────────────────────── #
 
 def save_csv(trades: List[Trade], path: str):
-    fields = ["side", "entry_time", "entry_price", "qty", "sl", "tp", "atr",
+    fields = ["engine", "side", "entry_time", "entry_price", "qty", "sl", "tp", "atr",
               "exit_time", "exit_price", "exit_reason", "pnl_usdt", "pnl_pct", "funding_cost"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)

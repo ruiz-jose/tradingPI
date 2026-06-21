@@ -30,6 +30,8 @@ class EMAStrategy:
         er_min: float = 0.0,
         rsi_sell_min: float = 20.0,
         rsi_sell_max: float = 60.0,
+        mr_rsi_oversold: float = 25.0,
+        mr_rsi_overbought: float = 75.0,
     ):
         self.fast_period = fast_period
         self.slow_period = slow_period
@@ -39,7 +41,10 @@ class EMAStrategy:
         self.rsi_max = rsi_max
         self.rsi_sell_min = rsi_sell_min
         self.rsi_sell_max = rsi_sell_max
+        self.mr_rsi_oversold = mr_rsi_oversold
+        self.mr_rsi_overbought = mr_rsi_overbought
         self.adx_min = adx_min
+        self.last_close: float | None = None
 
         self.ema_fast: float | None = None
         self.ema_slow: float | None = None
@@ -163,6 +168,7 @@ class EMAStrategy:
                     else 100 - (100 / (1 + self._avg_gain / self._avg_loss))
                 )
 
+        self.last_close  = close
         self._prev_close = close
         self._prev_high  = high
         self._prev_low   = low
@@ -262,6 +268,23 @@ class EMAStrategy:
             return False
         rsi_ok = self.rsi_sell_min <= self.current_rsi <= self.rsi_sell_max
         return rsi_ok and self._adx_ok and self._atr_regime_ok and self.is_trending
+
+    @property
+    def mr_long_signal(self) -> bool:
+        """Señal de mean-reversion al alza: solo en régimen lateral/choppy (ER < REGIME_ER_MIN,
+        lo opuesto de is_trending) con RSI en sobreventa extrema. Mutuamente excluyente con
+        can_enter_long por construcción (uno exige is_trending, el otro exige lo contrario),
+        así que nunca compiten por la misma vela."""
+        if self.is_trending or self.current_rsi is None:
+            return False
+        return self.current_rsi <= self.mr_rsi_oversold and self._atr_regime_ok
+
+    @property
+    def mr_short_signal(self) -> bool:
+        """Espejo de mr_long_signal para sobrecompra extrema en régimen lateral."""
+        if self.is_trending or self.current_rsi is None:
+            return False
+        return self.current_rsi >= self.mr_rsi_overbought and self._atr_regime_ok
 
     @property
     def is_bullish(self) -> bool:
