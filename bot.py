@@ -349,6 +349,12 @@ class TradingBot:
                       state.symbol, config.MAX_CONCURRENT_POSITIONS)
             return
 
+        funding_rate = await self._get_funding_rate(state.symbol)
+        if self._funding_blocks_entry(side, funding_rate):
+            log.info("[%s] %s omitido — funding rate desfavorable (%.4f%%/8h)",
+                      state.symbol, side, (funding_rate or 0) * 100)
+            return
+
         balance = await self._get_usdt_balance()
         await self._refresh_month_balance(balance)
         await self._refresh_day_balance(balance)
@@ -645,6 +651,25 @@ class TradingBot:
     # ------------------------------------------------------------------ #
     # Balance de la cuenta de Futuros                                      #
     # ------------------------------------------------------------------ #
+
+    async def _get_funding_rate(self, symbol: str) -> float | None:
+        """Funding rate actual (premiumIndex) que se aplicará en el próximo periodo de 8h.
+        Positivo → LONG paga a SHORT; negativo → SHORT paga a LONG. None si falla la consulta
+        (no bloquea la entrada: más vale operar sin el filtro que no operar por un error de red)."""
+        try:
+            mark = await self.client.futures_mark_price(symbol=symbol)
+            return float(mark["lastFundingRate"])
+        except Exception as exc:
+            log.warning("[%s] No se pudo obtener funding rate: %s", symbol, exc)
+            return None
+
+    def _funding_blocks_entry(self, side: str, funding_rate: float | None) -> bool:
+        """True si el funding actual es desfavorable para el lado que se quiere abrir."""
+        if not config.FUNDING_FILTER_ENABLED or funding_rate is None:
+            return False
+        if side == "LONG":
+            return funding_rate > config.FUNDING_RATE_MAX_FOR_LONG
+        return funding_rate < config.FUNDING_RATE_MIN_FOR_SHORT
 
     async def _get_usdt_balance(self) -> float:
         balances = await self.client.futures_account_balance()

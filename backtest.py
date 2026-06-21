@@ -74,6 +74,8 @@ class Trade:
     initial_qty:    float = 0.0   # qty original al entrar (para pnl_pct correcto tras scale-out)
     scale_out_pnl:  float = 0.0   # PnL cobrado en la salida parcial
     scale_out_done: bool  = False  # True tras ejecutar el scale-out (evita doble ejecución)
+    initial_risk:   float = 0.0   # |entry - sl inicial|, referencia fija para el break-even (1R)
+    breakeven_done: bool  = False  # True tras mover el SL a break-even (evita recalcularlo cada vela)
     side:           str   = "LONG"  # LONG | SHORT (usado por backtest_futures.py)
     funding_cost:   float = 0.0   # costo acumulado de funding (solo backtest_futures.py)
     engine:         str   = "TREND"  # TREND | MR (usado por backtest_hybrid.py)
@@ -215,6 +217,19 @@ def run_backtest(
                 balance_history.append(balance)
                 continue
 
+            # ── Break-even: tras alcanzar BREAKEVEN_R × riesgo inicial, mover el SL a
+            # entrada + buffer (cubre fees/slippage) para garantizar que el trade ya no
+            # puede cerrar en pérdida. Se compara con el high de la vela, no el close,
+            # para no perderse el toque intracandle. Solo sube el SL, nunca lo baja. ──
+            if (config.BREAKEVEN_R > 0 and not current.breakeven_done
+                    and current.initial_risk > 0):
+                be_trigger = current.entry_price + config.BREAKEVEN_R * current.initial_risk
+                if high >= be_trigger:
+                    be_price = current.entry_price * (1 + config.BREAKEVEN_BUFFER)
+                    if be_price > current.sl:
+                        current.sl = round(be_price, 2)
+                    current.breakeven_done = True
+
             # ── Trailing stop: elevar SL siguiendo el precio de cierre, con multiplicador
             # adaptado a la fuerza de tendencia actual (ADX) ──
             if config.TRAILING_STOP and strategy.current_atr:
@@ -246,14 +261,16 @@ def run_backtest(
 
             if qty > 0:
                 balance -= entry * qty * FEE   # comisión de entrada
+                initial_sl = risk_manager.get_stop_loss(entry, "BUY", atr, strategy.current_adx)
                 current = Trade(
                     entry_time  = _fmt(open_time),
                     entry_price = round(entry, 2),
                     qty         = qty,
                     initial_qty = qty,
-                    sl          = risk_manager.get_stop_loss(entry, "BUY", atr, strategy.current_adx),
+                    sl          = initial_sl,
                     tp          = risk_manager.get_take_profit(entry, "BUY", atr),
                     atr         = round(atr, 2) if atr else 0,
+                    initial_risk = round(entry - initial_sl, 2),
                 )
                 in_position = True
 

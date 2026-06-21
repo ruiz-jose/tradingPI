@@ -110,10 +110,27 @@ class Config:
     SCALE_OUT_R:     float = 0.0   # 0 = desactivado | >0 = activo (múltiplos de R)
     SCALE_OUT_RATIO: float = 0.5   # fracción de la posición a cerrar (0.5 = 50 %)
 
+    # Break-even: al llegar a BREAKEVEN_R × riesgo inicial (R = |entrada - SL inicial|),
+    # mueve el SL a entrada + BREAKEVEN_BUFFER (cubre fees/slippage de la salida).
+    # Objetivo: limitar la cola de "ganador que se convierte en perdedor" sin capar
+    # el upside como hace el scale-out (que ya se descartó por reducir Sharpe).
+    # Calibrar con backtest.py + walkforward.py antes de fijar el valor final.
+    BREAKEVEN_R:      float = 0.0     # 0 = desactivado | >0 = activo (múltiplos de R)
+    BREAKEVEN_BUFFER: float = 0.0015  # 0.15% sobre entrada — cubre comisión + slippage de salida
+
     # Estimación de costo de funding en Futuros (se cobra/paga cada 8h sobre el notional).
-    # Usado solo en backtest_futures.py para no sobreestimar el rendimiento de mantener
-    # posiciones abiertas varios días en Futuros.
+    # Usado solo como fallback en backtest_futures.py cuando no hay dato histórico real
+    # disponible para un periodo (datos faltantes en el endpoint de Binance).
     FUNDING_RATE_ASSUMPTION: float = 0.0001   # 0.01% por periodo de 8h (valor típico histórico)
+
+    # Filtro de funding rate: evita abrir una posición cuando el funding actual ya es
+    # desfavorable para ese lado (en Binance, funding positivo = los LONG pagan a los SHORT;
+    # funding negativo = los SHORT pagan a los LONG). Mantener una posición varios días contra
+    # un funding persistente puede comerse buena parte del edge de la estrategia.
+    # 0 = filtro desactivado.
+    FUNDING_FILTER_ENABLED:    bool  = True
+    FUNDING_RATE_MAX_FOR_LONG: float = 0.0003   # no abrir LONG si funding actual > 0.03%/8h
+    FUNDING_RATE_MIN_FOR_SHORT: float = -0.0003  # no abrir SHORT si funding actual < -0.03%/8h
 
     # Filtro de régimen: Efficiency Ratio (detecta mercados laterales/choppy)
     # ER = |movimiento neto en N velas| / |suma de movimientos individuales|
