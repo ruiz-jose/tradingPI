@@ -1,8 +1,23 @@
 import asyncio
 import logging
+import math
 import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+
+# Windows fix: aiodns falla con c-ares en Windows; forzar resolver nativo de Python
+# (mismo parche que backtest.py — sin esto, AsyncClient.create() no resuelve DNS en Windows).
+import aiohttp as _aiohttp
+from aiohttp import ThreadedResolver as _ThreadedResolver
+_orig_connector_init = _aiohttp.TCPConnector.__init__
+def _patched_connector_init(self, *, resolver=None, **kwargs):
+    if resolver is None:
+        resolver = _ThreadedResolver()
+    _orig_connector_init(self, resolver=resolver, **kwargs)
+_aiohttp.TCPConnector.__init__ = _patched_connector_init
+
 from binance import AsyncClient, BinanceSocketManager
 from binance.enums import (
     SIDE_BUY, SIDE_SELL,
@@ -81,6 +96,10 @@ class TradingBot:
         self.trades_today: int = 0
         self.consecutive_losses: int = 0
         self.cooldown_until: datetime | None = None
+        # Reglas de precisión/lote por símbolo (Futures) — pobladas en _load_symbol_filters().
+        # Sin esto, redondear qty/precio con valores fijos rechaza casi todas las órdenes de
+        # BTCUSDT (stepSize real 0.001, tickSize 0.10) y SOLUSDT (stepSize 0.01).
+        self.symbol_filters: dict[str, dict] = {}
 
     # ------------------------------------------------------------------ #
     # Ciclo principal                                                      #
@@ -97,9 +116,12 @@ class TradingBot:
         log.info("Conectado a Binance Futures [%s] | Pares: %s | Intervalo: %s",
                   mode, ", ".join(config.SYMBOLS), config.INTERVAL)
 
+        await self._load_symbol_filters()
+
         for symbol in config.SYMBOLS:
             await self._setup_symbol(symbol)
             await self._warmup(self.states[symbol])
+            await self._recover_state(self.states[symbol])
 
         initial_balance = await self._get_usdt_balance()
         self.month_start_balance = initial_balance
@@ -135,6 +157,103 @@ class TradingBot:
             log.info("Leverage %dx configurado para %s", config.LEVERAGE, symbol)
         except Exception as exc:
             log.warning("Error configurando leverage para %s: %s", symbol, exc)
+
+    # ------------------------------------------------------------------ #
+    # Reglas de lote/precio reales por símbolo (Futures exchangeInfo)     #
+    # ------------------------------------------------------------------ #
+
+    async def _load_symbol_filters(self) -> None:
+        """Descarga LOT_SIZE/PRICE_FILTER/MIN_NOTIONAL reales por símbolo. Sin esto, redondear
+        qty/precio a un número fijo de decimales rechaza órdenes: BTCUSDT necesita stepSize=0.001
+        (3 decimales) y tickSize=0.10, no los 5/2 decimales fijos que asumía el código anterior."""
+        info = await self.client.futures_exchange_info()
+        for s in info["symbols"]:
+            if s["symbol"] not in config.SYMBOLS:
+                continue
+            step_size = tick_size = min_qty = min_notional = None
+            for f in s["filters"]:
+                if f["filterType"] == "LOT_SIZE":
+                    step_size = float(f["stepSize"])
+                    min_qty = float(f["minQty"])
+                elif f["filterType"] == "PRICE_FILTER":
+                    tick_size = float(f["tickSize"])
+                elif f["filterType"] == "MIN_NOTIONAL":
+                    min_notional = float(f["notional"])
+            self.symbol_filters[s["symbol"]] = {
+                "qty_precision": s["quantityPrecision"],
+                "price_precision": s["pricePrecision"],
+                "step_size": step_size or 1.0,
+                "tick_size": tick_size or 1.0,
+                "min_qty": min_qty or 0.0,
+                "min_notional": min_notional or 0.0,
+            }
+            log.info("[%s] Filtros cargados: step=%s tick=%s minQty=%s minNotional=%s",
+                      s["symbol"], step_size, tick_size, min_qty, min_notional)
+
+    def _round_qty(self, symbol: str, qty: float) -> float:
+        f = self.symbol_filters.get(symbol)
+        if not f or qty <= 0:
+            return 0.0
+        qty = math.floor(qty / f["step_size"]) * f["step_size"]
+        qty = round(qty, f["qty_precision"])
+        return qty if qty >= f["min_qty"] else 0.0
+
+    def _round_price(self, symbol: str, price: float) -> float:
+        f = self.symbol_filters.get(symbol)
+        if not f:
+            return round(price, 2)
+        price = round(price / f["tick_size"]) * f["tick_size"]
+        return round(price, f["price_precision"])
+
+    def _meets_min_notional(self, symbol: str, qty: float, price: float) -> bool:
+        f = self.symbol_filters.get(symbol)
+        if not f:
+            return True
+        return qty * price >= f["min_notional"]
+
+    # ------------------------------------------------------------------ #
+    # Recuperación de estado al (re)iniciar: evita doble entrada si el    #
+    # proceso se reinicia mientras hay una posición abierta en Binance.   #
+    # ------------------------------------------------------------------ #
+
+    async def _recover_state(self, state: SymbolState) -> None:
+        try:
+            positions = await self.client.futures_position_information(symbol=state.symbol)
+            pos = next((p for p in positions if float(p["positionAmt"]) != 0), None)
+            if not pos:
+                return
+
+            amt = float(pos["positionAmt"])
+            side = "LONG" if amt > 0 else "SHORT"
+            qty = abs(amt)
+            entry_price = float(pos["entryPrice"])
+
+            open_orders = await self.client.futures_get_open_orders(symbol=state.symbol)
+            sl_order = next((o for o in open_orders if o["type"] == "STOP_MARKET"), None)
+            tp_order = next((o for o in open_orders if o["type"] == "TAKE_PROFIT_MARKET"), None)
+
+            state.in_position = True
+            state.side = side
+            state.entry_price = entry_price
+            state.current_qty = qty
+            state.entry_atr = state.strategy.current_atr or 0.0
+            state.sl_order_id = str(sl_order["orderId"]) if sl_order else None
+            state.tp_order_id = str(tp_order["orderId"]) if tp_order else None
+            state.current_sl = float(sl_order["stopPrice"]) if sl_order else 0.0
+
+            log.warning(
+                "[%s] Posición EXISTENTE recuperada al iniciar: %s qty=%s entry=%.2f | SL=%s TP=%s",
+                state.symbol, side, qty, entry_price,
+                sl_order["stopPrice"] if sl_order else "AUSENTE",
+                tp_order["stopPrice"] if tp_order else "AUSENTE",
+            )
+            await notify(
+                f"⚠️ [{state.symbol}] Posición existente detectada al iniciar el bot: {side} {qty} @ {entry_price:.2f}. "
+                f"SL: {'OK' if sl_order else 'FALTA — revisar manualmente'} | "
+                f"TP: {'OK' if tp_order else 'FALTA — revisar manualmente'}"
+            )
+        except Exception as exc:
+            log.error("[%s] Error recuperando estado de posición existente: %s", state.symbol, exc)
 
     # ------------------------------------------------------------------ #
     # Calentamiento: carga velas históricas                               #
@@ -376,15 +495,16 @@ class TradingBot:
         adx = state.strategy.current_adx
         vol_mult = state.strategy.vol_multiplier
         qty = self.risk_manager.calculate_position_size(balance, price, atr, vol_mult, adx)
+        qty = self._round_qty(state.symbol, qty)
 
-        if qty <= 0:
-            log.warning("[%s] Tamaño de posición insuficiente (balance: %.2f USDT). Omitido.",
+        if qty <= 0 or not self._meets_min_notional(state.symbol, qty, price):
+            log.warning("[%s] Tamaño de posición insuficiente tras redondeo de lote (balance: %.2f USDT). Omitido.",
                        state.symbol, balance)
             return
 
         risk_side = "BUY" if is_long else "SELL"
-        sl = self.risk_manager.get_stop_loss(price, risk_side, atr, adx)
-        tp = self.risk_manager.get_take_profit(price, risk_side, atr)
+        sl = self._round_price(state.symbol, self.risk_manager.get_stop_loss(price, risk_side, atr, adx))
+        tp = self._round_price(state.symbol, self.risk_manager.get_take_profit(price, risk_side, atr))
 
         if not self.risk_manager.is_sl_safe_from_liquidation(price, sl, side):
             liq = self.risk_manager.get_liquidation_price(price, side)
@@ -527,10 +647,10 @@ class TradingBot:
         is_long = state.side == "LONG"
         trail_mult = self.risk_manager.get_trailing_multiplier(state.strategy.current_adx)
         if is_long:
-            new_sl = round(close - state.strategy.current_atr * trail_mult, 2)
+            new_sl = self._round_price(state.symbol, close - state.strategy.current_atr * trail_mult)
             improved = new_sl > state.current_sl * (1 + config.TRAILING_STOP_MIN_MOVE)
         else:
-            new_sl = round(close + state.strategy.current_atr * trail_mult, 2)
+            new_sl = self._round_price(state.symbol, close + state.strategy.current_atr * trail_mult)
             improved = new_sl < state.current_sl * (1 - config.TRAILING_STOP_MIN_MOVE)
         if not improved:
             return
@@ -570,8 +690,8 @@ class TradingBot:
         if not triggered:
             return
 
-        partial_qty = round(state.current_qty * config.SCALE_OUT_RATIO, 5)
-        if partial_qty < config.MIN_QUANTITY:
+        partial_qty = self._round_qty(state.symbol, state.current_qty * config.SCALE_OUT_RATIO)
+        if partial_qty <= 0:
             state.scale_out_done = True
             return
 
@@ -582,7 +702,7 @@ class TradingBot:
                 type=FUTURE_ORDER_TYPE_MARKET, quantity=partial_qty, reduceOnly=True,
             )
             state.scale_out_done = True
-            remaining_qty = round(state.current_qty - partial_qty, 5)
+            remaining_qty = self._round_qty(state.symbol, state.current_qty - partial_qty)
             state.current_qty = remaining_qty
 
             log.info("[%s] SCALE-OUT %.0f%% | %s: %s | Precio: %.2f | Trigger: %.2f | Restante: %s",
@@ -601,14 +721,15 @@ class TradingBot:
                 except Exception as exc:
                     log.warning("[%s] Error cancelando SL para mover a break-even: %s", state.symbol, exc)
                 try:
+                    breakeven_price = self._round_price(state.symbol, state.entry_price)
                     sl_order = await self.client.futures_create_order(
                         symbol=state.symbol, side=close_side,
                         type=FUTURE_ORDER_TYPE_STOP_MARKET,
-                        stopPrice=str(state.entry_price), closePosition=True,
+                        stopPrice=str(breakeven_price), closePosition=True,
                     )
                     state.sl_order_id = str(sl_order["orderId"])
-                    state.current_sl  = state.entry_price
-                    log.info("[%s] SL movido a break-even: %.2f", state.symbol, state.entry_price)
+                    state.current_sl  = breakeven_price
+                    log.info("[%s] SL movido a break-even: %.2f", state.symbol, breakeven_price)
                 except Exception as exc:
                     log.error("[%s] Error recolocando SL en break-even: %s", state.symbol, exc)
                     state.sl_order_id = None
@@ -689,7 +810,7 @@ def setup_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[
-            logging.FileHandler("bot.log"),
+            logging.FileHandler("bot.log", encoding="utf-8"),
             logging.StreamHandler(sys.stdout),
         ],
     )

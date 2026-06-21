@@ -4,7 +4,20 @@ Ejecutar: python test_connection.py
 """
 import asyncio
 import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 from dotenv import load_dotenv
+
+# Windows fix: aiodns falla con c-ares en Windows; forzar resolver nativo de Python
+import aiohttp as _aiohttp
+from aiohttp import ThreadedResolver as _ThreadedResolver
+_orig_connector_init = _aiohttp.TCPConnector.__init__
+def _patched_connector_init(self, *, resolver=None, **kwargs):
+    if resolver is None:
+        resolver = _ThreadedResolver()
+    _orig_connector_init(self, resolver=resolver, **kwargs)
+_aiohttp.TCPConnector.__init__ = _patched_connector_init
+
 from binance import AsyncClient
 from binance.exceptions import BinanceAPIException
 from config import config
