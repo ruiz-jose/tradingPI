@@ -12,7 +12,10 @@ cortos. Cada elección de parámetro relevante fue validada con `backtest.py`, `
 - **Exchange**: Binance Futures USD-M (`bot.py`), modo de margen `ISOLATED`, apalancamiento `LEVERAGE = 2x`.
 - **Símbolos en vivo**: `SYMBOLS = BTCUSDT, ETHUSDT, SOLUSDT` — uno corre independiente del otro,
   compartiendo un solo balance de cuenta y un cap de `MAX_CONCURRENT_POSITIONS = 3` posiciones abiertas.
-- **Intervalo principal**: `INTERVAL = 8h`. Probado contra `4h` (Sharpe portfolio 0.79, DD 5.8%) y `1h/2h` (Sharpe negativo) — el timeframe de `8h` resultó el ganador absoluto con un Sharpe de portafolio de 1.83.
+- **Intervalo principal**: `INTERVAL = 4h`. Probado contra `1h/2h` (Sharpe negativo, puro ruido) y contra
+  `8h` (2026-06-21): el grid search de `optimize_portfolio.py` encontró `8h` con Sharpe in-sample de 1.83
+  (36m), pero la validación walk-forward out-of-sample (60m totales, train 36/test 3, 8 folds) lo
+  RECHAZÓ — ver sección 8 para el detalle. `4h` sigue siendo el único timeframe validado.
 - **Filtro HTF (Higher Time Frame)**: `HTF_INTERVAL = 1d`, misma EMA 9/21 sobre velas diarias, para
   confirmar la tendencia macro antes de operar el timeframe principal.
 
@@ -63,7 +66,7 @@ en `strategy.py`):
 3. **Régimen de volatilidad normal** (`ATR_VOL_MIN_RATIO=0.5`, `ATR_VOL_MAX_RATIO=3.0`): no entra si
    `current_atr` es menor al 50% del promedio histórico (mercado muerto) NI mayor al 300% (evento
    extremo / flash-crash, donde el sizing por ATR normal subestima el riesgo real — kill-switch).
-4. **Mercado trending** (`REGIME_ER_MIN=0.2`, Efficiency Ratio, periodo 12): se requiere `current_er >= 0.2`.
+4. **Mercado trending** (`REGIME_ER_MIN=0.2`, Efficiency Ratio, periodo 10): se requiere `current_er >= 0.2`.
    ER mide `|movimiento neto| / |suma de movimientos individuales|` — cerca de 1.0 es tendencia
    limpia, cerca de 0.0 es lateral/ruidoso. Este es el filtro de régimen que de verdad importa.
 
@@ -105,13 +108,13 @@ deliberada para no acoplar riesgo a apalancamiento.
 ### Trailing stop adaptativo por ADX
 
 En vez de un multiplicador de ATR fijo, `get_trailing_multiplier()` usa:
-- `ATR_SL_MULTIPLIER_TREND = 2.5` cuando `ADX >= ADX_TREND_THRESHOLD (25)` — tendencia fuerte,
+- `ATR_SL_MULTIPLIER_TREND = 3.0` cuando `ADX >= ADX_TREND_THRESHOLD (25)` — tendencia fuerte,
   stop más ancho para no cortar al ganador antes de tiempo.
-- `ATR_SL_MULTIPLIER_CHOP = 1.5` cuando ADX está por debajo — mercado débil, protege beneficios antes.
+- `ATR_SL_MULTIPLIER_CHOP = 2.0` cuando ADX está por debajo — mercado débil, protege beneficios antes.
 
 ### Take-profit como techo de seguridad
 
-`ATR_TP_MULTIPLIER = 5.0`: con `TRAILING_STOP=True`, el TP fijo se sigue evaluando como techo de
+`ATR_TP_MULTIPLIER = 4.0`: con `TRAILING_STOP=True`, el TP fijo se sigue evaluando como techo de
 seguridad (antes era código muerto que nunca se alcanzaba — bug corregido). El trailing normalmente
 cierra antes si el precio retrocede, pero el TP fijo cierra si el movimiento es tan favorable que
 llega a ese nivel igual.
@@ -144,13 +147,39 @@ Todos generan notificación por Telegram (`msg_circuit_breaker`, `msg_cooldown`)
 
 | Validación | Periodo | PF | Sharpe | Max DD | Veredicto |
 |---|---|---|---|---|---|
-| `backtest_multi.py` (BTC+ETH+SOL, 8H) | 36m | — | 1.83 | 1.63% | EXCELENTE (4/4) |
-| `backtest.py` (BTC, long-only, 8H) | 36m | 3.16 | 0.79 | 1.48% | BUENA (4/5) |
-| `backtest_futures.py` (BTC, long/short, 8H) | 36m | 1.61 | 0.45 | 2.12% | ACEPTABLE (3/5) |
-| `backtest.py` (BTC, long-only, 4H anterior) | 36m | 2.31 | 1.19 | 2.8% | BUENA (4/5) |
-| `backtest_multi.py` (BTC+ETH+SOL, 4H anterior) | 36m | — | 0.79 | 5.8% | ACEPTABLE (2/4) |
+| `backtest.py` (BTC, long-only) | 36m | 2.31 | 1.19 | 2.8% | BUENA (4/5) |
+| `backtest.py` (BTC, long-only) | 60m | 1.57 | 0.61 | 2.8% | ACEPTABLE (3/5) |
+| `backtest_multi.py` (BTC+ETH+SOL) | 36m | — | 0.79 | 5.8% | ACEPTABLE (2/4) |
+| `walkforward.py` (out-of-sample, BTC) | 60m | 2.96 | 0.26 | — | confirma edge, Sharpe débil |
 
-**Lectura honesta**: Al mover el bot al intervalo de `8h` y calibrar los filtros de Efficiency Ratio (ER min = 0.2) y multiplicadores ATR (SL 2.5/1.5 y TP 5.0), la estrategia de la cartera conjunta logró un rendimiento de nivel institucional con un Sharpe del portafolio de **1.83** y un Max Drawdown del **1.63%**. Las operaciones son de menor frecuencia (~1 trade al mes por par), pero tienen un Profit Factor excelente (entre 3.16 y 5.49 por símbolo).
+**Lectura honesta**: gestión de riesgo de nivel profesional (drawdown siempre bajo, 2.8-5.8% en
+todas las pruebas) con edge direccional modesto y baja frecuencia de operación (~1-2 trades/mes en
+BTC 4h). El Sharpe nunca alcanza el estándar "bueno" (≥1.0) fuera de la ventana más favorable. El
+techo actual de la estrategia parece más estructural que un problema de calibración de parámetros.
+
+### Experimento descartado: timeframe 8H (2026-06-21)
+
+`optimize_portfolio.py` (grid search exhaustivo: timeframe × EMA × ER × ATR SL/TP × breakeven,
+miles de combinaciones) encontró `INTERVAL=8h` + `ATR_SL_MULTIPLIER_TREND/CHOP=2.5/1.5` +
+`ATR_TP_MULTIPLIER=5.0` + `REGIME_ER_PERIOD=12` como ganador in-sample (36m): Sharpe portfolio
+**1.83**, PF BTC 3.16, Max DD 1.63% — números muy por encima de cualquier configuración previa.
+
+Validación walk-forward (`find_best_strategy.py: validate_walkforward`, 60m totales, train 36m /
+test 3m, 8 folds out-of-sample) **rechazó el cambio**:
+- BTC: 4 trades en 24 meses OOS, retorno acumulado +0.84%
+- ETH: 13 trades en 24 meses OOS, **Sharpe OOS promedio -1.72** (fold 2026-03→06 con Sharpe -12.52
+  sobre solo 2 trades), retorno acumulado -0.12%
+- SOL: 9 trades en 24 meses OOS, retorno acumulado +0.74%
+
+Con un timeframe más largo (8h vs 4h) la estrategia opera todavía con menos frecuencia (32
+trades/36m in-sample vs 57-107 en 4h) — exactamente el mismo patrón que ya descartó break-even y
+scale-out: un grid search exhaustivo sobre una muestra de ~30 operaciones encuentra fácilmente una
+combinación que luce excelente in-sample por azar, pero no hay suficientes operaciones OOS para
+demostrar que el resultado generaliza, y al menos un símbolo (ETH) muestra reversión clara a
+negativo fuera de muestra. **Se mantiene `INTERVAL=4h`** con los parámetros ATR/ER previamente
+validados. `find_best_strategy.py` y `optimize_portfolio.py` quedan disponibles para futuras
+búsquedas, pero cualquier ganador in-sample debe pasar por `validate_walkforward` con un mínimo de
+operaciones OOS razonable antes de aplicarse a `config.py`.
 
 ## 9. Mensajes de log relevantes
 
