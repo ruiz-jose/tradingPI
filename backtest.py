@@ -79,6 +79,7 @@ class Trade:
     side:           str   = "LONG"  # LONG | SHORT (usado por backtest_futures.py)
     funding_cost:   float = 0.0   # costo acumulado de funding (solo backtest_futures.py)
     engine:         str   = "TREND"  # TREND | MR (usado por backtest_hybrid.py)
+    risk_usdt:      float = 0.0   # riesgo nominal asignado (usado por backtest_multi.py --portfolio-risk-cap)
 
 
 # ──────────────────────────────────────────────────────────────────── #

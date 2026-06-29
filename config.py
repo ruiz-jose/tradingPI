@@ -65,6 +65,13 @@ class Config:
 
     # Gestión de riesgo
     RISK_PER_TRADE: float = 0.005        # 0.5% del balance por operación
+    # Cap de riesgo simultáneo entre todos los símbolos abiertos (BTC/ETH/SOL están altamente
+    # correlacionados: 3 posiciones a la vez no son 3 apuestas independientes de 0.5% cada una,
+    # es casi una sola apuesta de hasta 1.5% si el mercado se mueve junto). En vez de estimar
+    # correlación en vivo (ruidoso con tan pocos trades), se asume el caso conservador
+    # correlación≈1 y se limita el riesgo nominal abierto total. Validar con backtest_multi.py
+    # (--portfolio-risk-cap) antes de ajustar este valor.
+    PORTFOLIO_RISK_CAP: float = float(os.getenv("PORTFOLIO_RISK_CAP", "0.01"))  # 1% del balance
     ATR_PERIOD: int = 14
     ATR_SL_MULTIPLIER: float = 2.5       # SL = entrada ∓ 2.5×ATR (fallback si no hay régimen ADX)
     ATR_TP_MULTIPLIER: float = 4.0       # TP fijo — actúa como techo de seguridad aunque TRAILING_STOP=True

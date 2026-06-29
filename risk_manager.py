@@ -62,6 +62,32 @@ class RiskManager:
         qty = round(qty, 5)
         return qty if qty >= config.MIN_QUANTITY else 0.0
 
+    def calculate_position_size_capped(
+        self, balance: float, open_risk_usdt: float, price: float, atr: float | None = None,
+        vol_multiplier: float = 1.0, adx: float | None = None,
+    ) -> tuple[float, float]:
+        """Igual que calculate_position_size, pero recorta el riesgo nominal de la nueva
+        posición para que el riesgo abierto total (open_risk_usdt + esta posición) no supere
+        PORTFOLIO_RISK_CAP del balance. Devuelve (qty, risk_usdt_asignado) — risk_usdt_asignado
+        es el riesgo NOMINAL (pre-recorte) que debe registrarse en el estado del símbolo, para
+        que el cap se aplique sobre el riesgo objetivo de cada posición y no se vaya diluyendo
+        con recortes sucesivos."""
+        nominal_risk = balance * config.RISK_PER_TRADE * vol_multiplier
+        available_risk = max(0.0, balance * config.PORTFOLIO_RISK_CAP - open_risk_usdt)
+        risk_amount = min(nominal_risk, available_risk)
+
+        if risk_amount <= 0:
+            return 0.0, 0.0
+
+        if atr and atr > 0:
+            stop_distance = atr * self.get_trailing_multiplier(adx)
+        else:
+            stop_distance = price * 0.02  # fallback si ATR no disponible
+        qty = round(risk_amount / stop_distance, 5)
+        if qty < config.MIN_QUANTITY:
+            return 0.0, 0.0
+        return qty, nominal_risk
+
     def get_trailing_multiplier(self, adx: float | None) -> float:
         """Multiplicador de ATR para el trailing stop, adaptado a la fuerza de tendencia.
         Tendencia fuerte (ADX alto) → stop más ancho, deja correr al ganador.

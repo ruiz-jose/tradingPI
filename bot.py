@@ -55,6 +55,7 @@ class SymbolState:
     entry_price:    float = 0.0
     entry_atr:      float = 0.0
     current_qty:    float = 0.0
+    risk_usdt:      float = 0.0   # riesgo nominal asignado (pre-recorte por PORTFOLIO_RISK_CAP)
     scale_out_done: bool  = False
     sl_order_id:    str | None = None
     tp_order_id:    str | None = None
@@ -426,6 +427,12 @@ class TradingBot:
     def _count_open_positions(self) -> int:
         return sum(1 for s in self.states.values() if s.in_position)
 
+    def _open_risk_usdt(self) -> float:
+        """Suma del riesgo nominal de todas las posiciones abiertas — usado por
+        PORTFOLIO_RISK_CAP para no asumir que posiciones correlacionadas (BTC/ETH/SOL)
+        son apuestas independientes."""
+        return sum(s.risk_usdt for s in self.states.values() if s.in_position)
+
     # ------------------------------------------------------------------ #
     # Apertura de posición (largo o corto)                                #
     # ------------------------------------------------------------------ #
@@ -494,12 +501,17 @@ class TradingBot:
         atr = state.strategy.current_atr
         adx = state.strategy.current_adx
         vol_mult = state.strategy.vol_multiplier
-        qty = self.risk_manager.calculate_position_size(balance, price, atr, vol_mult, adx)
+        qty, risk_usdt = self.risk_manager.calculate_position_size_capped(
+            balance, self._open_risk_usdt(), price, atr, vol_mult, adx
+        )
         qty = self._round_qty(state.symbol, qty)
 
         if qty <= 0 or not self._meets_min_notional(state.symbol, qty, price):
-            log.warning("[%s] Tamaño de posición insuficiente tras redondeo de lote (balance: %.2f USDT). Omitido.",
-                       state.symbol, balance)
+            log.warning(
+                "[%s] Tamaño de posición insuficiente tras redondeo de lote o cap de riesgo "
+                "de portafolio agotado (balance: %.2f USDT, riesgo abierto: %.2f USDT). Omitido.",
+                state.symbol, balance, self._open_risk_usdt(),
+            )
             return
 
         risk_side = "BUY" if is_long else "SELL"
@@ -530,15 +542,15 @@ class TradingBot:
             state.scale_out_done = False
             state.current_qty    = qty
             state.current_sl     = sl
+            state.risk_usdt       = risk_usdt
 
             self.trade_logger.log_trade({
                 "action": "OPEN", "side": side, "symbol": state.symbol,
                 "price": price, "quantity": qty, "stop_loss": sl, "take_profit": tp,
                 "order_id": order["orderId"], "atr": round(atr, 2) if atr else None,
             })
-            log.info("[%s] %s ejecutado | Qty: %s | Precio: %.2f | SL: %.2f | TP: %.2f | ATR: %.2f | VolMult: %.2f",
-                     state.symbol, side, qty, price, sl, tp, atr or 0, vol_mult)
-            risk_usdt = balance * config.RISK_PER_TRADE * vol_mult
+            log.info("[%s] %s ejecutado | Qty: %s | Precio: %.2f | SL: %.2f | TP: %.2f | ATR: %.2f | VolMult: %.2f | Riesgo: %.2f USDT",
+                     state.symbol, side, qty, price, sl, tp, atr or 0, vol_mult, risk_usdt)
             if is_long:
                 await notify(msg_trade_open(state.symbol, price, qty, sl, tp, atr or 0, risk_usdt, vol_mult))
             else:
@@ -636,6 +648,7 @@ class TradingBot:
         state.entry_price    = 0.0
         state.entry_atr      = 0.0
         state.current_sl     = 0.0
+        state.risk_usdt       = 0.0
 
     # ------------------------------------------------------------------ #
     # Trailing stop adaptativo (ADX)                                       #

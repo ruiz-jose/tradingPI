@@ -113,9 +113,15 @@ async def fetch_all(
 def run_portfolio_backtest(
     pairs_data: Dict[str, Tuple[list, list]],
     initial_balance: float,
+    portfolio_risk_cap: float = 0.0,
 ) -> Tuple[Dict[str, List[Trade]], List[float]]:
+    """portfolio_risk_cap > 0 activa el cap de riesgo simultáneo entre símbolos
+    (ver risk_manager.calculate_position_size_capped) — 0 mantiene el comportamiento
+    actual (cada símbolo se sizea de forma independiente, sin tope conjunto)."""
 
     risk_manager = RiskManager()
+    if portfolio_risk_cap > 0:
+        config.PORTFOLIO_RISK_CAP = portfolio_risk_cap
 
     pairs: List[PairState] = []
     for symbol, (klines_4h, klines_1d) in pairs_data.items():
@@ -245,9 +251,19 @@ def run_portfolio_backtest(
                       and pair.strategy.can_enter_long):
                     atr   = pair.strategy.current_atr
                     entry = close * (1 + slip)
-                    qty   = risk_manager.calculate_position_size(
-                        balance, entry, atr, pair.strategy.vol_multiplier, pair.strategy.current_adx
-                    )
+                    if portfolio_risk_cap > 0:
+                        open_risk_usdt = sum(
+                            p.position.risk_usdt for p in pairs if p.in_position and p.position
+                        )
+                        qty, risk_usdt = risk_manager.calculate_position_size_capped(
+                            balance, open_risk_usdt, entry, atr,
+                            pair.strategy.vol_multiplier, pair.strategy.current_adx,
+                        )
+                    else:
+                        qty = risk_manager.calculate_position_size(
+                            balance, entry, atr, pair.strategy.vol_multiplier, pair.strategy.current_adx
+                        )
+                        risk_usdt = balance * config.RISK_PER_TRADE * pair.strategy.vol_multiplier
                     if qty > 0:
                         balance -= entry * qty * FEE
                         pair.position = Trade(
@@ -258,6 +274,7 @@ def run_portfolio_backtest(
                             sl          = risk_manager.get_stop_loss(entry, "BUY", atr, pair.strategy.current_adx),
                             tp          = risk_manager.get_take_profit(entry, "BUY", atr),
                             atr         = round(atr, 2) if atr else 0,
+                            risk_usdt   = risk_usdt,
                         )
                         pair.in_position = True
 
@@ -451,15 +468,23 @@ def save_csv(trades_by_symbol: Dict[str, List[Trade]], path: str):
 # Punto de entrada                                                       #
 # ──────────────────────────────────────────────────────────────────── #
 
-async def main(symbols: List[str], months: int, initial_balance: float, csv_path: Optional[str]):
+async def main(
+    symbols: List[str], months: int, initial_balance: float, csv_path: Optional[str],
+    portfolio_risk_cap: float = 0.0,
+):
     print(f"\nDescargando datos para {len(symbols)} pares ({months} meses)...")
     pairs_data = await fetch_all(symbols, months)
 
     for sym, (k4h, k1d) in pairs_data.items():
         print(f"  {sym}: {len(k4h):,} velas 4H  |  {len(k1d):,} velas 1D")
 
+    if portfolio_risk_cap > 0:
+        print(f"\nCap de riesgo de portafolio activo: {portfolio_risk_cap*100:.1f}% del balance")
+
     print("\nEjecutando simulación...\n")
-    trades_by_symbol, balance_history = run_portfolio_backtest(pairs_data, initial_balance)
+    trades_by_symbol, balance_history = run_portfolio_backtest(
+        pairs_data, initial_balance, portfolio_risk_cap
+    )
 
     print_portfolio_report(trades_by_symbol, balance_history, initial_balance, months)
 
@@ -476,7 +501,11 @@ if __name__ == "__main__":
     parser.add_argument("--months",  type=int,   default=36,    help="Meses de historial (default: 36)")
     parser.add_argument("--balance", type=float, default=1000.0, help="Balance inicial USDT (default: 1000)")
     parser.add_argument("--csv",     type=str,   default=None,  help="Exportar operaciones a CSV")
+    parser.add_argument(
+        "--portfolio-risk-cap", type=float, default=0.0,
+        help="Cap de riesgo simultáneo entre símbolos, ej. 0.01 = 1%% del balance (0 = desactivado, default)",
+    )
     args = parser.parse_args()
 
     from typing import Optional  # needed inside __main__ scope
-    asyncio.run(main(args.symbols, args.months, args.balance, args.csv))
+    asyncio.run(main(args.symbols, args.months, args.balance, args.csv, args.portfolio_risk_cap))
