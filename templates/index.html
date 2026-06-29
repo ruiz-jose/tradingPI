@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>TradingPI Dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>TradingPI <span class="sub">EMA Crossover 4H — Binance Futures</span></h1>
+    <div id="conn-badge" class="badge unknown">conectando…</div>
+  </header>
+
+  <section class="grid">
+    <div class="card">
+      <h2>Balance</h2>
+      <div class="big" id="balance">—</div>
+      <div class="muted" id="mode">—</div>
+    </div>
+    <div class="card">
+      <h2>PnL no realizado</h2>
+      <div class="big" id="upnl">—</div>
+      <div class="muted">posiciones abiertas en vivo</div>
+    </div>
+    <div class="card">
+      <h2>PnL total cerrado</h2>
+      <div class="big" id="total-pnl">—</div>
+      <div class="muted" id="total-trades">—</div>
+    </div>
+    <div class="card">
+      <h2>Win rate / Profit Factor</h2>
+      <div class="big"><span id="win-rate">—</span> / <span id="pf">—</span></div>
+      <div class="muted" id="losses-streak">—</div>
+    </div>
+  </section>
+
+  <section class="grid two">
+    <div class="card">
+      <h2>Posiciones abiertas</h2>
+      <table id="positions-table">
+        <thead><tr><th>Símbolo</th><th>Lado</th><th>Qty</th><th>Entrada</th><th>Mark</th><th>PnL</th><th>Lev.</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="muted" id="positions-empty">Sin posiciones abiertas</div>
+    </div>
+    <div class="card">
+      <h2>Por símbolo</h2>
+      <table id="symbol-table">
+        <thead><tr><th>Símbolo</th><th>Trades</th><th>Win rate</th><th>PnL</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card wide">
+      <h2>Curva de equity (PnL acumulado, trades cerrados)</h2>
+      <canvas id="equity-chart" height="80"></canvas>
+    </div>
+  </section>
+
+  <section class="grid two">
+    <div class="card">
+      <h2>Últimas operaciones cerradas</h2>
+      <table id="closed-table">
+        <thead><tr><th>Hora</th><th>Símbolo</th><th>Lado</th><th>Entrada</th><th>Salida</th><th>PnL</th><th>Cierre</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>Log en vivo</h2>
+      <pre id="log-box"></pre>
+    </div>
+  </section>
+
+  <footer>Actualiza cada 5s · <span id="last-update">—</span></footer>
+
+<script src="/static/dashboard.js"></script>
+</body>
+</html>
